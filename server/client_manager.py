@@ -1,122 +1,158 @@
 import threading
 import pickle
+import logging
+import queue
 import socket
 import ssl
-import queue
-import time
-import curses
-from global_aggregator.global_aggregator import GlobalAggregator  # Import GlobalAggregator
+import random
+from global_aggregator.global_aggregator import GlobalAggregator
+from global_aggregator.model_manager import train_initial_model
+
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class ClientManager:
     def __init__(self):
-        self.clients = []  # List of connected clients (sockets and their addresses)
-        self.model_queue = queue.Queue()  # Queue for storing received models
-        self.lock = threading.Lock()  # Lock for thread safety
-        self.global_aggregator = GlobalAggregator()  # Initialize GlobalAggregator
+        self.clients = {}
+        self.model_queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.global_aggregator = GlobalAggregator()
+        self.rounds = 3
+        self.current_round = 0
+        self.model = train_initial_model()
+        self.server_socket = None
+        self.clients_per_round = 3  # Adjust the number of clients per round
 
-    def terminal_ui(self, stdscr):
-        """Terminal UI to monitor connected clients and received models."""
-        curses.curs_set(0)  # Hide cursor
-        stdscr.nodelay(1)  # Non-blocking input
-
-        prev_clients = set()
-        prev_model_count = 0
-
-        try:
-            while True:
-                stdscr.clear()
-                stdscr.addstr(0, 0, "🟢 Client Manager Running...\n")
-                stdscr.addstr(1, 0, "Waiting for clients...\n")
-
-                with self.lock:
-                    current_clients = {f"{ip}:{port}" for _, (ip, port) in self.clients if isinstance((ip, port), tuple)}
-
-                if current_clients != prev_clients:
-                    prev_clients = current_clients
-                    stdscr.addstr(2, 0, "Connected Clients:\n")
-                    for idx, client in enumerate(current_clients, 3):
-                        stdscr.addstr(idx, 0, f"- {client}")
-
-                # Show received model count
-                current_model_count = self.model_queue.qsize()
-                if current_model_count != prev_model_count:
-                    prev_model_count = current_model_count
-                    stdscr.addstr(5, 0, f"\n📥 Received {current_model_count} models.")
-
-                stdscr.refresh()
-                time.sleep(2)
-
-        except Exception as e:
-            print(f"⚠️ Terminal UI error: {e}")
-
-        finally:
-            curses.endwin()  # Properly exit curses UI mode
+    def start_server(self, server_socket, ssl_context):
+        self.server_socket = server_socket
+        threading.Thread(target=self.accept_clients, args=(server_socket, ssl_context), daemon=True).start()
 
     def accept_clients(self, server_socket, ssl_context):
-        """Accept incoming client connections from the server."""
         while True:
             try:
                 client_socket, client_address = server_socket.accept()
-                print(f"🔗 Client connected: {client_address}")
-
-                # Wrap the socket with SSL encryption
+                logging.info(f"[NEW] Client connected: {client_address}")
                 secure_client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
-
-                with self.lock:
-                    self.clients.append((secure_client_socket, client_address))
-
-                # Send the global model to the newly connected client
-                threading.Thread(target=self.send_initial_model, args=(secure_client_socket,), daemon=True).start()
-
-                # Start a new thread to handle the client communication
+                self.clients[client_address] = (secure_client_socket, "connected", 0, 2, 'Not Sent', 'Not Received')  # Track status
                 threading.Thread(target=self.handle_client, args=(secure_client_socket, client_address), daemon=True).start()
-
             except Exception as e:
-                print(f"⚠️ Error accepting client: {e}")
+                logging.error(f"[ERROR] Accepting client: {e}")
 
-    def send_initial_model(self, client_socket):
-        """Send the current global model to the client when they connect."""
+    def handle_client(self, secure_client_socket, client_address):
         try:
-            serialized_weights = pickle.dumps(self.global_aggregator.global_model.get_weights())
-            client_socket.sendall(len(serialized_weights).to_bytes(4, byteorder='big'))
-            client_socket.sendall(serialized_weights)
-            print("✅ Sent initial model to client.")
-        except Exception as e:
-            print(f"⚠️ Error sending initial model: {e}")
-
-    def handle_client(self, client_socket, client_address):
-        """Receive model updates from clients and aggregate them."""
-        try:
+            self.send_initial_model(secure_client_socket, client_address)
             while True:
-                data_length_bytes = client_socket.recv(4)
+                data_length_bytes = self.receive_data(secure_client_socket, 4)
                 if not data_length_bytes:
-                    break  # Connection closed
+                    break
 
-                data_length = int.from_bytes(data_length_bytes, byteorder='big')
-                data = b''
-                while len(data) < data_length:
-                    chunk = client_socket.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
+                data_length = int.from_bytes(data_length_bytes, 'big')
+                data = self.receive_data(secure_client_socket, data_length)
+                if not data:
+                    break
 
-                if len(data) == data_length:
-                    try:
-                        model_data = pickle.loads(data)
-                        print(f"📥 Received model from {client_address}")
+                logging.info(f"[MODEL] Received {len(data)} bytes of model update from {client_address}")
+                model_data = pickle.loads(data)
 
-                        # Add received model to the queue for aggregation
-                        self.model_queue.put((client_address, model_data))
+                # Track the client's rounds and stop if the limit is reached
+                _, status, rounds_participated, max_rounds, _, _ = self.clients[client_address]
+                if rounds_participated >= max_rounds:
+                    logging.info(f"[INFO] Client {client_address} has completed its max rounds. Disconnecting.")
+                    self.clients[client_address] = (secure_client_socket, "disconnected", rounds_participated, max_rounds, 'Not Sent', 'Not Received')
+                    break
 
-                        # Acknowledge the receipt of the model
-                        client_socket.send(b"Model received and aggregated.")
-                    except Exception as e:
-                        print(f"⚠️ Error processing model from {client_address}: {e}")
-                        client_socket.send(b"Error processing model.")
+                self.model_queue.put((client_address, model_data))
+                self.aggregate_and_update_clients()
+
         except Exception as e:
-            print(f"⚠️ Error with client {client_address}: {e}")
+            logging.error(f"[ERROR] Client {client_address}: {e}")
         finally:
             with self.lock:
-                self.clients = [c for c in self.clients if c[1] != client_address]
-            client_socket.close()
-            print(f"❌ Client {client_address} disconnected.")
+                self.clients.pop(client_address, None)
+            logging.info(f"[DISCONNECTED] {client_address} removed from active clients.")
+
+    def send_initial_model(self, client_socket, client_address):
+        try:
+            serialized_weights = pickle.dumps(self.model.get_weights())
+            client_socket.sendall(len(serialized_weights).to_bytes(4, 'big'))
+            client_socket.sendall(serialized_weights)
+            logging.info(f"[SEND] Initial model sent to {client_address}")
+        except Exception as e:
+            logging.error(f"[ERROR] Sending initial model to {client_address}: {e}")
+
+    def receive_data(self, secure_client_socket, expected_length):
+        data = b""
+        while len(data) < expected_length:
+            try:
+                chunk = secure_client_socket.recv(min(4096, expected_length - len(data)))
+                if not chunk:
+                    logging.error(f"[ERROR] Connection lost while receiving data.")
+                    return None
+                data += chunk
+            except Exception as e:
+                logging.error(f"[ERROR] Exception receiving data: {e}")
+                return None
+
+        if len(data) != expected_length:
+            logging.warning(f"[WARNING] Incomplete data received.")
+            return None
+
+        return data
+
+    def aggregate_and_update_clients(self):
+        if not self.model_queue.empty():
+            client_updates = []
+            while not self.model_queue.empty():
+                client_address, model_data = self.model_queue.get()
+                logging.info(f"[AGGREGATE] Adding model update from {client_address} to aggregation queue.")
+                client_updates.append(model_data)
+
+            aggregated_weights = self.global_aggregator.aggregate_weights(client_updates)
+
+            if aggregated_weights is not None:
+                self.global_aggregator.update_model(aggregated_weights)
+                logging.info("[AGGREGATE] Global model updated. Sending updated model to all clients.")
+                self.send_updated_model_to_clients()
+            else:
+                logging.warning("[AGGREGATE] No valid model updates to aggregate.")
+
+    def send_updated_model_to_clients(self):
+        """Send updated model to clients and remove those that complete max rounds."""
+        with self.lock:
+            for client_address in list(self.clients.keys()):
+                secure_client_socket, status, rounds_participated, max_rounds, model_sent, model_received = self.clients[client_address]
+
+                if rounds_participated >= max_rounds:
+                    logging.info(f"[INFO] Client {client_address} has reached max rounds. Removing from active clients.")
+                    self.clients[client_address] = (secure_client_socket, "disconnected", rounds_participated, max_rounds, 'Not Sent', 'Not Received')
+                    secure_client_socket.close()
+                    continue  # Skip sending model
+
+                try:
+                    self.global_aggregator.send_updated_model(secure_client_socket)
+                    # Update the number of rounds the client has participated in
+                    self.clients[client_address] = (secure_client_socket, status, rounds_participated + 1, max_rounds, 'Sent', model_received)
+                except Exception as e:
+                    logging.error(f"[ERROR] Sending updated model to {client_address}: {e}")
+
+    def select_clients_for_round(self):
+        eligible_clients = [client_address for client_address, client_info in self.clients.items()
+                            if client_info[2] < client_info[3]]  # Track rounds and max rounds
+
+        selected_clients = random.sample(eligible_clients, min(self.clients_per_round, len(eligible_clients)))
+        return selected_clients
+
+    def run_rounds(self):
+        for self.current_round in range(self.rounds):
+            logging.info(f"Starting round {self.current_round + 1}/{self.rounds}")
+
+            selected_clients = self.select_clients_for_round()
+
+            # Stop if all clients have completed their max rounds
+            if not selected_clients:
+                logging.info("[STOP] All clients have completed their assigned rounds. Training is complete.")
+                break
+
+            self.send_model_to_selected_clients(selected_clients)
+            self.aggregate_and_update_clients()
+
+        logging.info("[INFO] Training rounds completed. Clients remain connected but won't receive further updates.")
