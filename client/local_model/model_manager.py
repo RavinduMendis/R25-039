@@ -10,7 +10,7 @@ def get_model():
     """Create and return the initialized model."""
     return create_model()
 
-def load_and_train_model(epochs=1):
+def load_and_train_model(epochs=5):
     """Load data and train the model."""
     x_train, y_train, x_test, y_test = load_data()
     model = get_model()

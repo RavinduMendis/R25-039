@@ -1,74 +1,134 @@
 import threading
 import pickle
 import logging
-import queue
-import socket
 import ssl
-import random
+import socket
 from global_aggregator.global_aggregator import GlobalAggregator
 from global_aggregator.model_manager import train_initial_model
+from attackdefense.adr import ADRMonitor
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class ClientManager:
-    def __init__(self):
+    def __init__(self, rounds=10, clients_per_round=1, test_data=None, test_labels=None):
         self.clients = {}
-        self.model_queue = queue.Queue()
         self.lock = threading.Lock()
         self.global_aggregator = GlobalAggregator()
-        self.rounds = 3
-        self.current_round = 0
+        self.rounds = rounds
+        self.clients_per_round = clients_per_round
         self.model = train_initial_model()
-        self.server_socket = None
-        self.clients_per_round = 3  # Adjust the number of clients per round
+        self.received_models = []
+        self.models_received_in_round = 0
+        self.adr_monitor = ADRMonitor()
+        # Test dataset for evaluating model accuracy
+        self.test_data = test_data
+        self.test_labels = test_labels
 
     def start_server(self, server_socket, ssl_context):
-        self.server_socket = server_socket
         threading.Thread(target=self.accept_clients, args=(server_socket, ssl_context), daemon=True).start()
 
     def accept_clients(self, server_socket, ssl_context):
         while True:
             try:
                 client_socket, client_address = server_socket.accept()
-                logging.info(f"[NEW] Client connected: {client_address}")
                 secure_client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
-                self.clients[client_address] = (secure_client_socket, "connected", 0, 2, 'Not Sent', 'Not Received')  # Track status
+                logging.info(f"[NEW] Client connected: {client_address}")
+                
+                # Log client connection directly in the ADRMonitor
+                self.adr_monitor.log_client_connection(client_address)
+
+                with self.lock:
+                    self.clients[client_address] = secure_client_socket
                 threading.Thread(target=self.handle_client, args=(secure_client_socket, client_address), daemon=True).start()
             except Exception as e:
                 logging.error(f"[ERROR] Accepting client: {e}")
 
     def handle_client(self, secure_client_socket, client_address):
         try:
+            # Send initial model to the client
             self.send_initial_model(secure_client_socket, client_address)
+            
             while True:
+                # Receive model update from the client
                 data_length_bytes = self.receive_data(secure_client_socket, 4)
                 if not data_length_bytes:
                     break
 
+                # Determine the length of the data and receive it
                 data_length = int.from_bytes(data_length_bytes, 'big')
                 data = self.receive_data(secure_client_socket, data_length)
                 if not data:
                     break
-
-                logging.info(f"[MODEL] Received {len(data)} bytes of model update from {client_address}")
+                
+                # Unpickle the received model data
                 model_data = pickle.loads(data)
+                logging.info(f"[MODEL] Received {len(data)} bytes of model update from {client_address}")
 
-                # Track the client's rounds and stop if the limit is reached
-                _, status, rounds_participated, max_rounds, _, _ = self.clients[client_address]
-                if rounds_participated >= max_rounds:
-                    logging.info(f"[INFO] Client {client_address} has completed its max rounds. Disconnecting.")
-                    self.clients[client_address] = (secure_client_socket, "disconnected", rounds_participated, max_rounds, 'Not Sent', 'Not Received')
-                    break
+                # Test accuracy on the current global model before aggregation
+                self.test_model_accuracy(context="Pre-aggregation")
+                
+                # Send the received model data to ADRMonitor for anomaly detection
+                self.adr_monitor.monitor_model_update(client_address, model_data)
+                # The monitoring function already detects anomalies, no need to call detect_anomalies here.
 
-                self.model_queue.put((client_address, model_data))
-                self.aggregate_and_update_clients()
+                # Store the received model data and update the count
+                with self.lock:
+                    self.received_models.append(model_data)
+                    self.models_received_in_round += 1
+
+                # If all models have been received, aggregate and update
+                if self.models_received_in_round == self.clients_per_round:
+                    logging.info("[INFO] All models received, starting aggregation...")
+                    self.aggregate_and_update_clients()
 
         except Exception as e:
             logging.error(f"[ERROR] Client {client_address}: {e}")
         finally:
             with self.lock:
                 self.clients.pop(client_address, None)
+            self.adr_monitor.log_client_disconnection(client_address)
             logging.info(f"[DISCONNECTED] {client_address} removed from active clients.")
+
+
+    def aggregate_and_update_clients(self):
+        """Aggregates received models and sends the updated global model to clients."""
+        try:
+            # Delegate aggregation to GlobalAggregator
+            aggregated_weights = self.global_aggregator.aggregate_weights(self.received_models)
+            if aggregated_weights:
+                logging.info("[INFO] Aggregation complete, updating global model...")
+                self.global_aggregator.update_model(aggregated_weights)
+                
+                # Test accuracy on the updated model after aggregation
+                self.test_model_accuracy(context="Post-aggregation")
+
+                # Send the updated model to all clients using GlobalAggregator
+                for client_address, client_socket in self.clients.items():
+                    self.global_aggregator.send_updated_model(client_socket)
+                
+                # Clear the received models for the next round
+                self.received_models.clear()
+                self.models_received_in_round = 0
+                logging.info("[INFO] Completed model aggregation and update.")
+        except Exception as e:
+            logging.error(f"[ERROR] Aggregation or update failed: {e}")
+
+    def test_model_accuracy(self, context=""):
+        """
+        Evaluates the global aggregated model on the test dataset (if provided) and logs accuracy.
+        """
+        if self.test_data is not None and self.test_labels is not None:
+            try:
+                # Evaluate using the global model in the aggregator
+                loss, accuracy = self.global_aggregator.model.evaluate(self.test_data, self.test_labels, verbose=0)
+                logging.info(f"[{context}] Test accuracy: {accuracy}")
+                return accuracy
+            except Exception as e:
+                logging.error(f"[{context}] Error during model evaluation: {e}")
+                return None
+        else:
+            logging.info(f"[{context}] Test accuracy: (test dataset not provided)")
+            return None
 
     def send_initial_model(self, client_socket, client_address):
         try:
@@ -85,74 +145,21 @@ class ClientManager:
             try:
                 chunk = secure_client_socket.recv(min(4096, expected_length - len(data)))
                 if not chunk:
-                    logging.error(f"[ERROR] Connection lost while receiving data.")
                     return None
                 data += chunk
             except Exception as e:
                 logging.error(f"[ERROR] Exception receiving data: {e}")
                 return None
-
-        if len(data) != expected_length:
-            logging.warning(f"[WARNING] Incomplete data received.")
-            return None
-
         return data
 
-    def aggregate_and_update_clients(self):
-        if not self.model_queue.empty():
-            client_updates = []
-            while not self.model_queue.empty():
-                client_address, model_data = self.model_queue.get()
-                logging.info(f"[AGGREGATE] Adding model update from {client_address} to aggregation queue.")
-                client_updates.append(model_data)
-
-            aggregated_weights = self.global_aggregator.aggregate_weights(client_updates)
-
-            if aggregated_weights is not None:
-                self.global_aggregator.update_model(aggregated_weights)
-                logging.info("[AGGREGATE] Global model updated. Sending updated model to all clients.")
-                self.send_updated_model_to_clients()
-            else:
-                logging.warning("[AGGREGATE] No valid model updates to aggregate.")
-
     def send_updated_model_to_clients(self):
-        """Send updated model to clients and remove those that complete max rounds."""
         with self.lock:
-            for client_address in list(self.clients.keys()):
-                secure_client_socket, status, rounds_participated, max_rounds, model_sent, model_received = self.clients[client_address]
-
-                if rounds_participated >= max_rounds:
-                    logging.info(f"[INFO] Client {client_address} has reached max rounds. Removing from active clients.")
-                    self.clients[client_address] = (secure_client_socket, "disconnected", rounds_participated, max_rounds, 'Not Sent', 'Not Received')
-                    secure_client_socket.close()
-                    continue  # Skip sending model
-
+            for client_address, secure_client_socket in self.clients.items():
                 try:
-                    self.global_aggregator.send_updated_model(secure_client_socket)
-                    # Update the number of rounds the client has participated in
-                    self.clients[client_address] = (secure_client_socket, status, rounds_participated + 1, max_rounds, 'Sent', model_received)
+                    serialized_weights = pickle.dumps(self.global_aggregator.model.get_weights())
+                    secure_client_socket.sendall(len(serialized_weights).to_bytes(4, 'big'))
+                    secure_client_socket.sendall(serialized_weights)
+                    logging.info(f"[SEND] Updated model sent to {client_address}")
                 except Exception as e:
                     logging.error(f"[ERROR] Sending updated model to {client_address}: {e}")
 
-    def select_clients_for_round(self):
-        eligible_clients = [client_address for client_address, client_info in self.clients.items()
-                            if client_info[2] < client_info[3]]  # Track rounds and max rounds
-
-        selected_clients = random.sample(eligible_clients, min(self.clients_per_round, len(eligible_clients)))
-        return selected_clients
-
-    def run_rounds(self):
-        for self.current_round in range(self.rounds):
-            logging.info(f"Starting round {self.current_round + 1}/{self.rounds}")
-
-            selected_clients = self.select_clients_for_round()
-
-            # Stop if all clients have completed their max rounds
-            if not selected_clients:
-                logging.info("[STOP] All clients have completed their assigned rounds. Training is complete.")
-                break
-
-            self.send_model_to_selected_clients(selected_clients)
-            self.aggregate_and_update_clients()
-
-        logging.info("[INFO] Training rounds completed. Clients remain connected but won't receive further updates.")

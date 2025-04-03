@@ -53,7 +53,7 @@ def start_server():
     
     # Create a TCP/IP socket
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind(('127.0.0.1', 5000))  # Bind the server to localhost and port 5001
+    server_socket.bind(('127.0.0.1', 5001))  # Bind the server to localhost and port 5001
     server_socket.listen(5)  # Listen for up to 5 connections
     print("Server listening...")
 

@@ -6,7 +6,7 @@ from edge_node import edge_node_function
 
 def start_client():
     server_host = '127.0.0.1'
-    server_port = 5000
+    server_port = 5001
     client_port = 6001  # Static port for the client
     certfile = './certifications/client_cert.pem'
     keyfile = './certifications/client_key.pem'

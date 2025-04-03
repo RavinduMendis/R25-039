@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Client Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.3.2/socket.io.min.js"></script>
+</head>
+<body>
+    <h1>Client Dashboard</h1>
+    <div id="client-status">
+        <!-- Dynamic content will be inserted here -->
+    </div>
+
+    <script>
+        // Initialize SocketIO client
+        const socket = io.connect('http://127.0.0.1:5000');  // Connecting to the Flask-SocketIO server
+
+        // Listen for 'update_dashboard' event and handle the data
+        socket.on('update_dashboard', function(data) {
+            // Update the UI with the new data
+            const clientStatusDiv = document.getElementById('client-status');
+            clientStatusDiv.innerHTML = '';  // Clear previous content
+
+            // Iterate over the clients data and update the DOM
+            data.clients.forEach(function(client) {
+                const clientDiv = document.createElement('div');
+                clientDiv.innerHTML = `
+                    <strong>${client.name}</strong><br>
+                    Status: ${client.status}<br>
+                    Rounds Completed: ${client.rounds}<br>
+                    <hr>
+                `;
+                clientStatusDiv.appendChild(clientDiv);
+            });
+
+            // Optionally display other messages
+            if (data.message) {
+                const messageDiv = document.createElement('div');
+                messageDiv.innerHTML = `<strong>Message:</strong> ${data.message}`;
+                clientStatusDiv.appendChild(messageDiv);
+            }
+        });
+    </script>
+</body>
+</html>
