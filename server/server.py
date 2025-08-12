@@ -1,78 +1,107 @@
-import socket
-import ssl
-import threading
-import time
-# import curses  # Commented out since we're not using the UI part for now
+import asyncio
+import logging
+import os
+import sys
+from typing import List, Any
+from aiohttp import web
+
+# =======================================================================
+# === PATH CONFIGURATION TO FIX ABSOLUTE IMPORTS ===
+# This block of code ensures that the project's root directory
+# is added to the Python path, allowing for absolute imports like
+# `from server.utils.log_manager import ...` to work correctly.
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+    print(f"Added '{parent_dir}' to sys.path.")
+# =======================================================================
+
+# Add the 'scpm/protos' directory to the Python path
+protos_path = os.path.join(current_dir, 'scpm', 'protos')
+if protos_path not in sys.path:
+    sys.path.append(protos_path)
+    print(f"Added '{protos_path}' to sys.path.")
+
+# --- CORRECTED IMPORT STATEMENTS ---
+# All imports must now reference the 'server' package from the top level.
+from utils.log_manager import configure_root_logging, add_json_file_handler, LOG_DIR
+from scpm.scpm import ServerControlPlaneManager
 from client_manager import ClientManager
-# from colorama import Fore, Style, init  # Commented out as well
+from orchestrator import Orchestrator
+from model_manager.model_manager import ModelManager 
 
-# Initialize colorama
-# init(autoreset=True)  # Commented out for now
+root_logger = logging.getLogger()
+configure_root_logging(root_logger) 
 
-# Commented out UI function since we're not using it
-# def update_status_ui(stdscr, client_manager):
-#     """Handles real-time display of client status in the terminal."""
-#     curses.curs_set(0)  # Hide the cursor
-#     curses.start_color()
-#     curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Green for Active
-#     curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)  # Red for Disconnected
+# Attach a JSON file handler for structured logging
+add_json_file_handler("server", "server_log.json")
+logger = logging.getLogger("server")
 
-#     while True:
-#         stdscr.clear()
-#         stdscr.addstr(0, 0, f"{'Client Name':<15} {'IP Address':<15} {'Port':<8} {'Status':<12} {'Rounds Left':<12} {'Model Sent':<20} {'Model Received':<20}\n", curses.A_BOLD)
+# Define a simple training configuration dictionary.
+training_config_dict = {
+    "min_clients_per_round": 3,
+    "client_selection_ratio": 0.5,
+    "max_rounds": 10,
+    "model_name": "SimpleCNN",
+    "dataset": "CIFAR-10"
+}
 
-#         with client_manager.lock:
-#             clients = client_manager.clients.items()
 
-#         for idx, (client_address, (secure_client_socket, status, model_send_status, model_receive_status)) in enumerate(clients, start=1):
-#             client_ip = client_address[0]
-#             client_port = client_address[1]
-#             rounds_left = client_manager.rounds - client_manager.current_round
+async def main():
+    """
+    The main entry point for the Federated Learning Server.
+    """
+    logger.info("Starting Federated Learning Server (FLS)...")
 
-#             if status == "connected":
-#                 color = curses.color_pair(1)  # Green for active
-#                 client_status = "Active"
-#             else:
-#                 color = curses.color_pair(2)  # Red for disconnected
-#                 client_status = "Disconnected"
-
-#             # Add color for model send and receive status
-#             model_send_color = Fore.GREEN if model_send_status == "Sent" else Fore.YELLOW
-#             model_receive_color = Fore.GREEN if model_receive_status == "Received" else Fore.YELLOW
-
-#             # Display client status
-#             stdscr.addstr(idx, 0, f"{f'client{idx}':<15} {client_ip:<15} {client_port:<8} {client_status:<12} {rounds_left:<12} "
-#                                   f"{model_send_color}{model_send_status:<20}{Style.RESET_ALL} "
-#                                   f"{model_receive_color}{model_receive_status:<20}{Style.RESET_ALL}", color)
-
-#         stdscr.refresh()
-#         time.sleep(2)
-
-def start_server():
-    """Start the server, manage client connections."""
-    
-    # Create a TCP/IP socket
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind(('127.0.0.1', 5001))  # Bind the server to localhost and port 5001
-    server_socket.listen(5)  # Listen for up to 5 connections
-    print("Server listening...")
-
-    # Set up SSL context for secure communication
-    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    context.load_cert_chain(certfile='./certifications/server.crt', keyfile='./certifications/server.key')
-
-    # Initialize the ClientManager to handle client-related logic
+    # Initialize core components
     client_manager = ClientManager()
+    logger.info("ClientManager initialized.")
 
-    # Start a new thread to handle incoming client connections
-    threading.Thread(target=client_manager.accept_clients, args=(server_socket, context), daemon=True).start()
+    # Start the client status checker right after initialization
+    await client_manager.start_status_checker()
 
-    # Main server loop can be kept for other functionalities or can be left empty
+    scpm = ServerControlPlaneManager(client_manager)
+    logger.info("ServerControlPlaneManager initialized.")
+
+    orchestrator = Orchestrator(training_config_dict, client_manager, scpm)
+    logger.info("Orchestrator initialized with a configuration dictionary.")
+
+    # AVOID CIRCULAR DEPENDENCY: Set the orchestrator on the scpm instance.
+    scpm.set_orchestrator(orchestrator)
+
+    # Start the orchestrator's training loop
+    orchestrator_task = asyncio.create_task(orchestrator.start_training())
+    logger.info("Federated learning training loop started.")
+
+    # Start communication listeners (gRPC, API)
+    communication_listener_tasks = await scpm.start_communication_listeners()
+    
+    logger.info("FLS communication listeners started successfully.")
+    
     try:
-        while True:
-            time.sleep(1)  # Server can wait here for client connections
-    except KeyboardInterrupt:
-        print("Server stopped manually.")  # Graceful shutdown on Ctrl+C
+        await asyncio.gather(
+            *communication_listener_tasks,
+            orchestrator_task
+        )
+
+    except asyncio.CancelledError:
+        logger.info("Server shutdown initiated due to task cancellation.")
+    except Exception as e:
+        logger.exception(f"An unhandled error occurred in the main server loop: {e}")
+    finally:
+        await client_manager.stop_status_checker()
+        logger.info("ClientManager status checker stopped.")
+
+        await scpm.stop_communication_listeners()
+        logger.info("FLS communication listeners stopped.")
+        logger.info("Federated Learning Server stopped.")
+
 
 if __name__ == "__main__":
-    start_server()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received. Shutting down server gracefully...")
+    except Exception as e:
+        logger.critical(f"Server exited with an unhandled error: {e}", exc_info=True)

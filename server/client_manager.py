@@ -1,165 +1,262 @@
-import threading
-import pickle
-import logging
-import ssl
-import socket
-from global_aggregator.global_aggregator import GlobalAggregator
-from global_aggregator.model_manager import train_initial_model
-from attackdefense.adr import ADRMonitor
+# server/client_manager.py
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+import logging
+import time
+import asyncio
+import json
+import random
+import os
+from typing import Dict, Union, List, Tuple, Any
+
+# Import ContextAdapter for consistent logging
+from utils.log_manager import ContextAdapter
+
+# Define the file path for persistent storage of client data
+CLIENT_DATA_FILE = "client_data.json"
+
+# Define a simple data structure for client information
+class ClientInfo:
+    def __init__(self, client_id: str, ip_address: str, client_type: str, status: str = "connected", last_heartbeat: int = int(time.time()), reputation: int = 100):
+        self.client_id = client_id
+        self.ip_address = ip_address
+        self.client_type = client_type # e.g., "WebSocket", "gRPC"
+        self.status = status # You can manage more detailed statuses here
+        self.last_heartbeat = last_heartbeat # Timestamp of last received heartbeat
+        self.reputation = reputation # A simple score to track client behavior
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Converts the ClientInfo object to a dictionary for JSON serialization."""
+        return self.__dict__
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'ClientInfo':
+        """Creates a ClientInfo object from a dictionary."""
+        return ClientInfo(**data)
+
+    def __repr__(self):
+        return f"ClientInfo(id='{self.client_id}', ip='{self.ip_address}', type='{self.client_type}', status='{self.status}', last_heartbeat={self.last_heartbeat}, reputation={self.reputation})"
 
 class ClientManager:
-    def __init__(self, rounds=10, clients_per_round=1, test_data=None, test_labels=None):
-        self.clients = {}
-        self.lock = threading.Lock()
-        self.global_aggregator = GlobalAggregator()
-        self.rounds = rounds
-        self.clients_per_round = clients_per_round
-        self.model = train_initial_model()
-        self.received_models = []
-        self.models_received_in_round = 0
-        self.adr_monitor = ADRMonitor()
-        # Test dataset for evaluating model accuracy
-        self.test_data = test_data
-        self.test_labels = test_labels
+    def __init__(self):
+        self.connected_clients: Dict[str, ClientInfo] = {} # {client_id: ClientInfo}
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = ContextAdapter(self.logger, {"component": self.__class__.__name__})
+        
+        self.heartbeat_timeout_seconds = 30 # Clients are considered disconnected if no heartbeat in this time
+        self.status_check_interval_seconds = 10 # How often to check client statuses
+        self.status_check_task = None # asyncio.Task for the status checker
+        self.clients_in_current_round: List[str] = []
+        self.clients_notified_for_round: List[str] = []
+        
+        # Load any previously saved client data on startup
+        self._load_clients()
+        self.logger.info(f"ClientManager initialized. Loaded {len(self.connected_clients)} clients.")
 
-    def start_server(self, server_socket, ssl_context):
-        threading.Thread(target=self.accept_clients, args=(server_socket, ssl_context), daemon=True).start()
-
-    def accept_clients(self, server_socket, ssl_context):
-        while True:
+    def _load_clients(self):
+        """Loads client data from a JSON file if it exists."""
+        if os.path.exists(CLIENT_DATA_FILE):
             try:
-                client_socket, client_address = server_socket.accept()
-                secure_client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
-                logging.info(f"[NEW] Client connected: {client_address}")
-                
-                # Log client connection directly in the ADRMonitor
-                self.adr_monitor.log_client_connection(client_address)
-
-                with self.lock:
-                    self.clients[client_address] = secure_client_socket
-                threading.Thread(target=self.handle_client, args=(secure_client_socket, client_address), daemon=True).start()
-            except Exception as e:
-                logging.error(f"[ERROR] Accepting client: {e}")
-
-    def handle_client(self, secure_client_socket, client_address):
-        try:
-            # Send initial model to the client
-            self.send_initial_model(secure_client_socket, client_address)
-            
-            while True:
-                # Receive model update from the client
-                data_length_bytes = self.receive_data(secure_client_socket, 4)
-                if not data_length_bytes:
-                    break
-
-                # Determine the length of the data and receive it
-                data_length = int.from_bytes(data_length_bytes, 'big')
-                data = self.receive_data(secure_client_socket, data_length)
-                if not data:
-                    break
-                
-                # Unpickle the received model data
-                model_data = pickle.loads(data)
-                logging.info(f"[MODEL] Received {len(data)} bytes of model update from {client_address}")
-
-                # Test accuracy on the current global model before aggregation
-                self.test_model_accuracy(context="Pre-aggregation")
-                
-                # Send the received model data to ADRMonitor for anomaly detection
-                self.adr_monitor.monitor_model_update(client_address, model_data)
-                # The monitoring function already detects anomalies, no need to call detect_anomalies here.
-
-                # Store the received model data and update the count
-                with self.lock:
-                    self.received_models.append(model_data)
-                    self.models_received_in_round += 1
-
-                # If all models have been received, aggregate and update
-                if self.models_received_in_round == self.clients_per_round:
-                    logging.info("[INFO] All models received, starting aggregation...")
-                    self.aggregate_and_update_clients()
-
-        except Exception as e:
-            logging.error(f"[ERROR] Client {client_address}: {e}")
-        finally:
-            with self.lock:
-                self.clients.pop(client_address, None)
-            self.adr_monitor.log_client_disconnection(client_address)
-            logging.info(f"[DISCONNECTED] {client_address} removed from active clients.")
-
-
-    def aggregate_and_update_clients(self):
-        """Aggregates received models and sends the updated global model to clients."""
-        try:
-            # Delegate aggregation to GlobalAggregator
-            aggregated_weights = self.global_aggregator.aggregate_weights(self.received_models)
-            if aggregated_weights:
-                logging.info("[INFO] Aggregation complete, updating global model...")
-                self.global_aggregator.update_model(aggregated_weights)
-                
-                # Test accuracy on the updated model after aggregation
-                self.test_model_accuracy(context="Post-aggregation")
-
-                # Send the updated model to all clients using GlobalAggregator
-                for client_address, client_socket in self.clients.items():
-                    self.global_aggregator.send_updated_model(client_socket)
-                
-                # Clear the received models for the next round
-                self.received_models.clear()
-                self.models_received_in_round = 0
-                logging.info("[INFO] Completed model aggregation and update.")
-        except Exception as e:
-            logging.error(f"[ERROR] Aggregation or update failed: {e}")
-
-    def test_model_accuracy(self, context=""):
-        """
-        Evaluates the global aggregated model on the test dataset (if provided) and logs accuracy.
-        """
-        if self.test_data is not None and self.test_labels is not None:
-            try:
-                # Evaluate using the global model in the aggregator
-                loss, accuracy = self.global_aggregator.model.evaluate(self.test_data, self.test_labels, verbose=0)
-                logging.info(f"[{context}] Test accuracy: {accuracy}")
-                return accuracy
-            except Exception as e:
-                logging.error(f"[{context}] Error during model evaluation: {e}")
-                return None
+                with open(CLIENT_DATA_FILE, 'r') as f:
+                    data = json.load(f)
+                    self.connected_clients = {
+                        client_id: ClientInfo.from_dict(info)
+                        for client_id, info in data.items()
+                    }
+                    self.logger.info(f"Successfully loaded {len(self.connected_clients)} clients from {CLIENT_DATA_FILE}.")
+            except (IOError, json.JSONDecodeError) as e:
+                self.logger.error(f"Failed to load client data from {CLIENT_DATA_FILE}: {e}")
         else:
-            logging.info(f"[{context}] Test accuracy: (test dataset not provided)")
-            return None
+            self.logger.info(f"No existing client data file found at {CLIENT_DATA_FILE}.")
 
-    def send_initial_model(self, client_socket, client_address):
+    def _save_clients(self):
+        """Saves current client data to a JSON file."""
         try:
-            serialized_weights = pickle.dumps(self.model.get_weights())
-            client_socket.sendall(len(serialized_weights).to_bytes(4, 'big'))
-            client_socket.sendall(serialized_weights)
-            logging.info(f"[SEND] Initial model sent to {client_address}")
-        except Exception as e:
-            logging.error(f"[ERROR] Sending initial model to {client_address}: {e}")
+            with open(CLIENT_DATA_FILE, 'w') as f:
+                data = {
+                    client_id: info.to_dict()
+                    for client_id, info in self.connected_clients.items()
+                }
+                json.dump(data, f, indent=4)
+            self.logger.info(f"Client data saved to {CLIENT_DATA_FILE}.")
+        except IOError as e:
+            self.logger.error(f"Failed to save client data to {CLIENT_DATA_FILE}: {e}")
 
-    def receive_data(self, secure_client_socket, expected_length):
-        data = b""
-        while len(data) < expected_length:
+    def add_or_update_client(self, client_id: str, ip_address: str, client_type: str) -> None:
+        """Adds or updates a client's information and saves the changes."""
+        client_info = self.connected_clients.get(client_id)
+        if client_info:
+            # Update existing client's info
+            client_info.ip_address = ip_address
+            client_info.client_type = client_type
+            client_info.status = "connected"
+            client_info.last_heartbeat = int(time.time())
+            self.logger.debug(f"Updated client information for {client_id}.")
+        else:
+            # Add new client
+            self.connected_clients[client_id] = ClientInfo(client_id, ip_address, client_type)
+            self.logger.info(f"New client {client_id} added.")
+        self._save_clients()
+
+    def update_client_heartbeat(self, client_id: str) -> bool:
+        """
+        Updates the heartbeat for a specific client.
+        Returns True if the client exists and was updated, False otherwise.
+        """
+        client_info = self.connected_clients.get(client_id)
+        if client_info:
+            client_info.last_heartbeat = int(time.time())
+            # If the client was previously disconnected, mark it as reconnected.
+            if client_info.status == "disconnected":
+                client_info.status = "connected"
+                self.logger.info(f"Client {client_id} reconnected (heartbeat received).")
+                self._save_clients()
+            return True
+        return False
+
+    async def _periodic_status_check(self):
+        """
+        Background task to periodically check client statuses based on heartbeats.
+        """
+        while True:
+            await asyncio.sleep(self.status_check_interval_seconds)
+            current_time = int(time.time())
+            disconnected_clients = []
+            
+            for client_id, client_info in self.connected_clients.items():
+                if client_info.status == "connected" and (current_time - client_info.last_heartbeat > self.heartbeat_timeout_seconds):
+                    client_info.status = "disconnected"
+                    self.logger.warning(f"Client {client_id} ({client_info.client_type}) heartbeat timeout. Marking as 'disconnected'.")
+                    disconnected_clients.append(client_id)
+
+            if disconnected_clients:
+                self.logger.info(f"Detected {len(disconnected_clients)} disconnected clients. Saving state.")
+                self._save_clients()
+            
+    async def start_status_checker(self):
+        """Starts the periodic client status checking task."""
+        if self.status_check_task is None or self.status_check_task.done():
+            self.status_check_task = asyncio.create_task(self._periodic_status_check())
+            self.logger.info("Client status checking task started.")
+
+    async def stop_status_checker(self):
+        """Stops the periodic client status checking task and saves client data."""
+        if self.status_check_task:
+            self.status_check_task.cancel()
             try:
-                chunk = secure_client_socket.recv(min(4096, expected_length - len(data)))
-                if not chunk:
-                    return None
-                data += chunk
-            except Exception as e:
-                logging.error(f"[ERROR] Exception receiving data: {e}")
-                return None
-        return data
+                await self.status_check_task
+            except asyncio.CancelledError:
+                self.logger.info("Client status checking task cancelled.")
+            self.status_check_task = None
+        self._save_clients() # Save data on graceful shutdown
+        
+    def is_client_connected(self, client_id: str) -> bool:
+        """Checks if a client is connected and active."""
+        client_info = self.connected_clients.get(client_id)
+        return client_info and client_info.status == "connected"
 
-    def send_updated_model_to_clients(self):
-        with self.lock:
-            for client_address, secure_client_socket in self.clients.items():
-                try:
-                    serialized_weights = pickle.dumps(self.global_aggregator.model.get_weights())
-                    secure_client_socket.sendall(len(serialized_weights).to_bytes(4, 'big'))
-                    secure_client_socket.sendall(serialized_weights)
-                    logging.info(f"[SEND] Updated model sent to {client_address}")
-                except Exception as e:
-                    logging.error(f"[ERROR] Sending updated model to {client_address}: {e}")
+    def get_connected_clients_ids(self) -> List[str]:
+        """Returns a list of IDs for all clients currently marked as 'connected'."""
+        return [client_id for client_id, client_info in self.connected_clients.items() if client_info.status == "connected"]
 
+    def get_all_clients_info(self) -> Dict[str, Dict[str, Any]]:
+        """Returns detailed information for all clients, including disconnected ones."""
+        return {
+            client_id: info.to_dict()
+            for client_id, info in self.connected_clients.items()
+        }
+
+    def get_total_clients_count(self) -> int:
+        """Returns the total number of clients managed by the server (connected and disconnected)."""
+        return len(self.connected_clients)
+
+    def get_connected_clients_count(self) -> int:
+        """Returns the number of clients currently marked as 'connected'."""
+        return len(self.get_connected_clients_ids())
+
+    def get_client_statuses(self) -> Dict[str, Any]:
+        """
+        Returns a dictionary of all managed clients, with their current status.
+        This provides a quick overview for the dashboard.
+        """
+        status_summary = {
+            "total_clients": self.get_total_clients_count(),
+            "connected_clients": 0,
+            "disconnected_clients": 0,
+            "clients": {}
+        }
+
+        for client_id, client_info in self.connected_clients.items():
+            if client_info.status == "connected":
+                status_summary["connected_clients"] += 1
+            elif client_info.status == "disconnected":
+                status_summary["disconnected_clients"] += 1
+            
+            status_summary["clients"][client_id] = {
+                "ip_address": client_info.ip_address,
+                "client_type": client_info.client_type,
+                "status": client_info.status,
+                "last_heartbeat": client_info.last_heartbeat,
+                "reputation": client_info.reputation
+            }
+            
+        return status_summary
+
+    def get_status(self) -> Dict[str, Any]:
+        """
+        Returns a summary of the ClientManager's current state.
+        This method is correctly implemented to be called by scpm.py.
+        """
+        return {
+            "total_clients": self.get_total_clients_count(),
+            "connected_clients": self.get_connected_clients_count(),
+            "status_checker_running": self.status_check_task is not None and not self.status_check_task.done()
+        }
+
+    # =================================================================
+    # New methods for Orchestrator to manage clients for a round
+    # =================================================================
+    def select_clients_for_round(self, clients_per_round: int) -> List[str]:
+        """Selects a number of connected clients for the next training round."""
+        connected_clients = self.get_connected_clients_ids()
+        
+        # Filter out clients with low reputation
+        eligible_clients = [c for c in connected_clients if self.connected_clients[c].reputation > 50]
+        
+        if len(eligible_clients) < clients_per_round:
+            self.logger.warning("Not enough eligible clients to start a round.")
+            return []
+        
+        # Use a more robust sampling method, e.g., weighted by reputation if needed.
+        # For now, we'll stick to a simple random sample from eligible clients.
+        selected = random.sample(eligible_clients, clients_per_round)
+        self.clients_in_current_round = selected
+        self.clients_notified_for_round = []
+        self.logger.info(f"Selected {len(selected)} clients for the new round: {selected}")
+        return selected
+
+    def is_client_selected_and_unnotified(self, client_id: str) -> bool:
+        """
+        Checks if the client is selected for the current round and has not yet been notified.
+        """
+        if client_id in self.clients_in_current_round and client_id not in self.clients_notified_for_round:
+            self.clients_notified_for_round.append(client_id)
+            return True
+        return False
+
+    def is_client_in_current_round(self, client_id: str) -> bool:
+        """Checks if a client is part of the current training round."""
+        return client_id in self.clients_in_current_round
+        
+    def penalize_client(self, client_id: str, penalty: int = 10):
+        """Reduces a client's reputation score, useful for ADRM."""
+        if client_id in self.connected_clients:
+            self.connected_clients[client_id].reputation -= penalty
+            if self.connected_clients[client_id].reputation < 0:
+                self.connected_clients[client_id].reputation = 0
+            self.logger.warning(f"Client {client_id} penalized. New reputation: {self.connected_clients[client_id].reputation}")
+            self._save_clients()
+
+    def reset_round_clients(self):
+        """Clears the client selection for the current round."""
+        self.clients_in_current_round = []
+        self.clients_notified_for_round = []

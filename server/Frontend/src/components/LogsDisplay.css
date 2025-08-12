@@ -1,0 +1,50 @@
+/* Ensure the container is specifically for logs within the card */
+.logs-card .log-container { 
+  height: 300px; /* Fixed height for scrollable logs */
+  overflow-y: auto; /* Enable scrolling */
+  border: 1px solid #e7e7e7;
+  border-radius: 4px;
+  padding: 10px;
+  background-color: #fdfdfd;
+}
+
+.log-entry {
+  display: flex;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 0.85em;
+  margin-bottom: 3px;
+  padding: 2px 0;
+  border-bottom: 1px dotted #f0f0f0;
+}
+
+.log-timestamp {
+  color: #888;
+  margin-right: 10px;
+  white-space: nowrap; /* Prevent wrapping */
+}
+
+.log-level {
+  font-weight: bold;
+  margin-right: 10px;
+  width: 60px; /* Fixed width for alignment */
+  flex-shrink: 0;
+}
+
+.log-message {
+  flex-grow: 1;
+  word-break: break-all; /* Break long words */
+}
+
+.log-component {
+  color: #666;
+  font-style: italic;
+  margin-left: 5px;
+  white-space: nowrap;
+}
+
+/* Log level specific colors */
+.log-level-info { color: #28a745; }
+.log-level-warning { color: #ffc107; }
+.log-level-error { color: #dc3545; }
+.log-level-critical { color: #dc3545; font-weight: bold; }
+.log-level-debug { color: #17a2b8; }

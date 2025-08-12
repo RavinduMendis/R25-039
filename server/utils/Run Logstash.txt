@@ -1,0 +1,1 @@
+k0k1s@b0at-l ~/D/F/s/utils [SIGINT]> /usr/share/logstash/bin/logstash -f "/home/k0k1s/Downloads/FLF 2.0/server/utils/logs.dfile"

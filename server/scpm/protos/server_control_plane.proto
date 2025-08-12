@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package server_control_plane;
+
+// The service definition for server control plane operations.
+service ServerControlPlaneService {
+    // Blocks a client.
+    rpc BlockClient(ClientIdRequest) returns (ClientActionResponse);
+    // Unblocks a client.
+    rpc UnblockClient(ClientIdRequest) returns (ClientActionResponse);
+    // Pauses a client.
+    rpc PauseClient(ClientIdRequest) returns (ClientActionResponse);
+    // Resumes a paused client.
+    rpc ResumeClient(ClientIdRequest) returns (ClientActionResponse);
+    // Removes a client from the system.
+    rpc RemoveClient(ClientIdRequest) returns (ClientActionResponse);
+}
+
+// Request message for a client ID.
+message ClientIdRequest {
+    string client_id = 1;
+}
+
+// Response message for a client action.
+message ClientActionResponse {
+    bool success = 1;
+    string message = 2;
+}
