@@ -1,0 +1,13 @@
+No, a hacker cannot compromise the server through the initial insecure connection in this setup. While the first contact is on an unencrypted channel, it is designed with a specific security model that prevents a direct compromise.
+
+The Core Security Principle
+
+The security of the system relies on the server's secret CA private key.
+
+    A new client connects to the insecure channel and sends a Certificate Signing Request (CSR) containing its public key.
+
+    The server uses its private key to cryptographically sign the client's CSR. This signature is proof that the server trusts the client.
+
+The server sends back the new, signed client certificate along with the public CA certificate.
+
+All subsequent communication must use the signed client certificate to connect to the secure mTLS channel.

@@ -1,0 +1,41 @@
+.main-nav {
+  width: 250px; /* Fixed width for the sidebar */
+  background-color: #34495e; /* Darker blue from dashboard.html */
+  padding: 20px 0;
+  box-shadow: 2px 0 5px rgba(0, 0, 0, 0.2);
+  flex-shrink: 0; /* Don't allow it to shrink */
+  display: flex;
+  flex-direction: column;
+}
+
+.main-nav ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.main-nav li {
+  margin-bottom: 5px;
+}
+
+.main-nav a {
+  display: block;
+  padding: 12px 20px;
+  color: #ecf0f1; /* Light gray text */
+  text-decoration: none;
+  font-weight: 600;
+  transition: background-color 0.3s ease, color 0.3s ease;
+  border-left: 5px solid transparent; /* For active state highlight */
+}
+
+.main-nav a:hover {
+  background-color: #49617a; /* Slightly lighter blue on hover */
+  color: #fff;
+}
+
+/* Style for active link from react-router-dom NavLink */
+.main-nav a.active { 
+  background-color: #2980b9; /* A distinct blue for active */
+  border-left-color: #2ecc71; /* Green highlight */
+  color: #fff;
+}

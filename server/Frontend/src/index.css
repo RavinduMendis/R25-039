@@ -1,0 +1,63 @@
+/* Import fonts from Google Fonts as in dashboard.html */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Roboto+Mono:wght@400&display=swap');
+
+body {
+  margin: 0;
+  font-family: 'Inter', sans-serif; /* Use Inter as main font */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #e9eff5; /* Light blue-gray background */
+  color: #333;
+  line-height: 1.6;
+}
+
+code {
+  font-family: 'Roboto Mono', monospace; /* For logs and code-like displays */
+}
+
+/* Base card styling */
+.card {
+  background-color: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); /* More pronounced shadow */
+  padding: 20px;
+  margin-bottom: 20px;
+  border: 1px solid #e0e0e0;
+}
+
+/* Status indicators */
+.status-online {
+  color: #28a745; /* Green */
+  font-weight: bold;
+}
+
+.status-offline {
+  color: #dc3545; /* Red */
+  font-weight: bold;
+}
+
+.status-warning {
+  color: #ffc107; /* Yellow/Orange */
+  font-weight: bold;
+}
+
+.status-active {
+    color: #007bff; /* Blue */
+    font-weight: bold;
+}
+
+/* General page container for routed components */
+.page-container {
+    padding: 20px;
+    margin: 0 auto;
+    text-align: left;
+}
+
+h1, h2, h3 {
+  color: #333;
+  margin-top: 0;
+}
+
+p {
+  margin-bottom: 10px;
+}

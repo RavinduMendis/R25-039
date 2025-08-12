@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+package fl_service;
+
+// ===================================================
+// Service Definitions
+// ===================================================
+
+// Defines the Greeter service with two methods.
+service Greeter {
+  // A standard RPC for secure, authenticated communication.
+  rpc SayHello (HelloRequest) returns (HelloReply) {}
+
+  // A one-time RPC used to register a new client and issue a certificate.
+  // This is intentionally served on an insecure channel.
+  rpc RegisterClient (ClientRegistrationRequest) returns (ClientRegistrationResponse) {}
+}
+
+// Define the gRPC service for client-server communication
+service ClientService {
+  // RPC for client registration
+  rpc RegisterClient (RegisterClientRequest) returns (RegisterClientResponse);
+
+  // RPC for getting server status
+  rpc GetServerStatus (StatusRequest) returns (StatusResponse);
+
+  // RPC for client heartbeats
+  rpc SendHeartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+
+  // RPC for a client to fetch the latest global model from the server.
+  rpc FetchModel (FetchModelRequest) returns (FetchModelResponse);
+
+  // RPC for a client to send its local model update to the server.
+  rpc SendModelUpdate (SendModelUpdateRequest) returns (SendModelUpdateResponse);
+}
+
+// ===================================================
+// Message Definitions
+// ===================================================
+
+// Request message for the SayHello RPC.
+message HelloRequest {
+  string name = 1;
+}
+
+// Response message for the SayHello RPC.
+message HelloReply {
+  string message = 1;
+}
+
+// Request message for the RegisterClient RPC.
+message ClientRegistrationRequest {
+  string client_id = 1;
+  bytes certificate_signing_request = 2;
+  string registration_token = 3;
+}
+
+// Response message for the RegisterClient RPC.
+message ClientRegistrationResponse {
+  bool success = 1;
+  string message = 2;
+  bytes signed_certificate = 3;
+  bytes ca_certificate = 4;
+}
+
+// Message for client registration request
+message RegisterClientRequest {
+  string client_id = 1;
+  string client_info = 2;
+}
+
+// Message for client registration response
+message RegisterClientResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Message for server status request
+message StatusRequest {
+  string client_id = 1;
+}
+
+// Message for server status response
+message StatusResponse {
+  string server_status = 1;
+  int32 connected_clients_count = 2;
+}
+
+// Heartbeat messages
+message HeartbeatRequest {
+  string client_id = 1;
+  int64 timestamp = 2;
+}
+
+message HeartbeatResponse {
+  bool success = 1;
+  string message = 2;
+  int64 server_timestamp = 3;
+  // This new field signals the client to start a training round.
+  bool new_round_available = 4;
+}
+
+// Messages for model fetching
+message FetchModelRequest {
+  string client_id = 1;
+}
+
+message FetchModelResponse {
+  bool success = 1;
+  string message = 2;
+  bytes model_data = 3;
+}
+
+// Messages for sending model updates
+message SendModelUpdateRequest {
+  string client_id = 1;
+  bytes model_update = 2;
+}
+
+message SendModelUpdateResponse {
+  bool success = 1;
+  string message = 2;
+}
