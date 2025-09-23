@@ -1,262 +1,278 @@
-# server/client_manager.py
-
 import logging
 import time
 import asyncio
 import json
 import random
 import os
-from typing import Dict, Union, List, Tuple, Any
+import datetime
+from typing import Dict, List, Any, Set, Optional
 
-# Import ContextAdapter for consistent logging
-from utils.log_manager import ContextAdapter
+from log_manager.log_manager import ContextAdapter
+from adrm.response_system import ResponseSystem
 
-# Define the file path for persistent storage of client data
-CLIENT_DATA_FILE = "client_data.json"
+# File paths for persistent storage
+CLIENT_DATA_FILE = "database/client_data.json"
+TEMP_CLIENT_DATA_FILE = "database/client_data.json.tmp"
 
-# Define a simple data structure for client information
+
 class ClientInfo:
-    def __init__(self, client_id: str, ip_address: str, client_type: str, status: str = "connected", last_heartbeat: int = int(time.time()), reputation: int = 100):
+    """Holds information about an individual client."""
+    def __init__(
+        self,
+        client_id: str,
+        ip_address: str,
+        client_type: str,
+        status: str = "connected",
+        last_heartbeat: Optional[int] = None,
+        reputation: int = 100,
+        last_successful_round: int = 0,
+        reputation_history: List[int] = None,
+        uptime_start_time: Optional[int] = None,
+        latency: float = 0.0,
+        last_round_participated: int = 0,
+        participation_history: List[Dict[str, Any]] = None
+    ):
         self.client_id = client_id
         self.ip_address = ip_address
-        self.client_type = client_type # e.g., "WebSocket", "gRPC"
-        self.status = status # You can manage more detailed statuses here
-        self.last_heartbeat = last_heartbeat # Timestamp of last received heartbeat
-        self.reputation = reputation # A simple score to track client behavior
+        self.client_type = client_type
+        self.status = status
+        current_time = int(time.time())
+        self.last_heartbeat = last_heartbeat if last_heartbeat is not None else current_time
+        self.uptime_start_time = uptime_start_time if uptime_start_time is not None else current_time
+        self.reputation = reputation
+        self.last_successful_round = last_successful_round
+        self.reputation_history = reputation_history if reputation_history is not None else [100]
+        self.latency = latency
+        self.last_round_participated = last_round_participated
+        self.participation_history = participation_history if participation_history is not None else []
 
     def to_dict(self) -> Dict[str, Any]:
-        """Converts the ClientInfo object to a dictionary for JSON serialization."""
         return self.__dict__
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> 'ClientInfo':
-        """Creates a ClientInfo object from a dictionary."""
-        return ClientInfo(**data)
+    def from_dict(data: Dict[str, Any]) -> "ClientInfo":
+        instance = ClientInfo(
+            client_id=data['client_id'], ip_address=data['ip_address'], client_type=data['client_type'],
+            status=data.get('status', 'connected'), last_heartbeat=data.get('last_heartbeat'),
+            reputation=data.get('reputation', 100), last_successful_round=data.get('last_successful_round', 0),
+            reputation_history=data.get('reputation_history', [100]), uptime_start_time=data.get('uptime_start_time'),
+            latency=data.get('latency', 0.0)
+        )
+        instance.last_round_participated = data.get('last_round_participated', 0)
+        instance.participation_history = data.get('participation_history', [])
+        return instance
 
     def __repr__(self):
-        return f"ClientInfo(id='{self.client_id}', ip='{self.ip_address}', type='{self.client_type}', status='{self.status}', last_heartbeat={self.last_heartbeat}, reputation={self.reputation})"
+        return f"ClientInfo(id='{self.client_id}', ip='{self.ip_address}', status='{self.status}', rep={self.reputation})"
+
 
 class ClientManager:
-    def __init__(self):
-        self.connected_clients: Dict[str, ClientInfo] = {} # {client_id: ClientInfo}
+    """Manages the state and lifecycle of clients connected to the FL server."""
+
+    # UPDATED: The __init__ no longer requires response_system to break the circular dependency
+    def __init__(self, cfg: Dict[str, Any]):
+        self.cfg = cfg
+        # UPDATED: Initialize response_system as None. It will be set later.
+        self.response_system: Optional[ResponseSystem] = None
+        self.connected_clients: Dict[str, ClientInfo] = {}
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger = ContextAdapter(self.logger, {"component": self.__class__.__name__})
-        
-        self.heartbeat_timeout_seconds = 30 # Clients are considered disconnected if no heartbeat in this time
-        self.status_check_interval_seconds = 10 # How often to check client statuses
-        self.status_check_task = None # asyncio.Task for the status checker
+        self.heartbeat_timeout_seconds = self.cfg.get("heartbeat_timeout_seconds", 20)
+        self.grace_period_timeout = self.cfg.get("grace_period_timeout", 300)
+        self.status_check_interval_seconds = self.cfg.get("status_check_interval_seconds", 5)
+        self.status_check_task = None
         self.clients_in_current_round: List[str] = []
-        self.clients_notified_for_round: List[str] = []
-        
-        # Load any previously saved client data on startup
+        self.clients_notified_for_round: Set[str] = set()
+        self._lock = asyncio.Lock()
         self._load_clients()
         self.logger.info(f"ClientManager initialized. Loaded {len(self.connected_clients)} clients.")
 
+    # NEW: Setter method to resolve the circular dependency
+    def set_response_system(self, response_system: ResponseSystem):
+        """Sets the ResponseSystem instance after initialization."""
+        self.response_system = response_system
+        self.logger.info("ResponseSystem dependency injected into ClientManager.")
+
     def _load_clients(self):
-        """Loads client data from a JSON file if it exists."""
-        if os.path.exists(CLIENT_DATA_FILE):
-            try:
-                with open(CLIENT_DATA_FILE, 'r') as f:
+        try:
+            os.makedirs(os.path.dirname(CLIENT_DATA_FILE), exist_ok=True)
+            if os.path.exists(CLIENT_DATA_FILE):
+                with open(CLIENT_DATA_FILE, "r") as f:
                     data = json.load(f)
                     self.connected_clients = {
-                        client_id: ClientInfo.from_dict(info)
-                        for client_id, info in data.items()
+                        client_id: ClientInfo.from_dict(info) for client_id, info in data.items()
                     }
-                    self.logger.info(f"Successfully loaded {len(self.connected_clients)} clients from {CLIENT_DATA_FILE}.")
-            except (IOError, json.JSONDecodeError) as e:
-                self.logger.error(f"Failed to load client data from {CLIENT_DATA_FILE}: {e}")
-        else:
-            self.logger.info(f"No existing client data file found at {CLIENT_DATA_FILE}.")
+                for c in self.connected_clients.values():
+                    c.status = "connected"; c.uptime_start_time = int(time.time())
+                self.logger.info(f"Loaded {len(self.connected_clients)} clients from {CLIENT_DATA_FILE}.")
+            else:
+                self.logger.info("No existing client data file found.")
+        except (IOError, json.JSONDecodeError, TypeError) as e:
+            self.logger.error(f"Failed to load client data: {e}. Starting fresh.", exc_info=True)
+            self.connected_clients = {}
 
-    def _save_clients(self):
-        """Saves current client data to a JSON file."""
+    def _save_clients_nolock(self):
         try:
-            with open(CLIENT_DATA_FILE, 'w') as f:
-                data = {
-                    client_id: info.to_dict()
-                    for client_id, info in self.connected_clients.items()
-                }
-                json.dump(data, f, indent=4)
-            self.logger.info(f"Client data saved to {CLIENT_DATA_FILE}.")
+            with open(TEMP_CLIENT_DATA_FILE, "w") as f:
+                json.dump({cid: info.to_dict() for cid, info in self.connected_clients.items()}, f, indent=4)
+            os.replace(TEMP_CLIENT_DATA_FILE, CLIENT_DATA_FILE)
+            self.logger.debug(f"Client data saved to {CLIENT_DATA_FILE}.")
         except IOError as e:
-            self.logger.error(f"Failed to save client data to {CLIENT_DATA_FILE}: {e}")
+            self.logger.error(f"Failed to save client data: {e}")
 
-    def add_or_update_client(self, client_id: str, ip_address: str, client_type: str) -> None:
-        """Adds or updates a client's information and saves the changes."""
-        client_info = self.connected_clients.get(client_id)
-        if client_info:
-            # Update existing client's info
-            client_info.ip_address = ip_address
-            client_info.client_type = client_type
-            client_info.status = "connected"
-            client_info.last_heartbeat = int(time.time())
-            self.logger.debug(f"Updated client information for {client_id}.")
-        else:
-            # Add new client
-            self.connected_clients[client_id] = ClientInfo(client_id, ip_address, client_type)
-            self.logger.info(f"New client {client_id} added.")
-        self._save_clients()
+    async def add_or_update_client(self, client_id: str, ip_address: str, client_type: str) -> None:
+        async with self._lock:
+            client_info = self.connected_clients.get(client_id)
+            if client_info:
+                client_info.ip_address = ip_address; client_info.client_type = client_type
+                client_info.status = "connected"; client_info.last_heartbeat = int(time.time())
+                self.logger.debug(f"Updated client info for {client_id}.")
+            else:
+                self.connected_clients[client_id] = ClientInfo(client_id, ip_address, client_type)
+                self.logger.info(f"New client {client_id} added.")
+            self._save_clients_nolock()
 
-    def update_client_heartbeat(self, client_id: str) -> bool:
-        """
-        Updates the heartbeat for a specific client.
-        Returns True if the client exists and was updated, False otherwise.
-        """
-        client_info = self.connected_clients.get(client_id)
-        if client_info:
+    async def update_client_heartbeat(self, client_id: str) -> bool:
+        async with self._lock:
+            client_info = self.connected_clients.get(client_id)
+            if not client_info: return False
             client_info.last_heartbeat = int(time.time())
-            # If the client was previously disconnected, mark it as reconnected.
             if client_info.status == "disconnected":
-                client_info.status = "connected"
-                self.logger.info(f"Client {client_id} reconnected (heartbeat received).")
-                self._save_clients()
+                client_info.status = "connected"; client_info.uptime_start_time = int(time.time())
+                self.logger.info(f"Client {client_id} reconnected (heartbeat).")
+                self._save_clients_nolock()
             return True
-        return False
+
+    async def deregister_client(self, client_id: str):
+        async with self._lock:
+            if client_id in self.connected_clients:
+                del self.connected_clients[client_id]
+                self.logger.info(f"Client {client_id} deregistered. Remaining: {len(self.connected_clients)}")
+                self._save_clients_nolock()
 
     async def _periodic_status_check(self):
-        """
-        Background task to periodically check client statuses based on heartbeats.
-        """
         while True:
             await asyncio.sleep(self.status_check_interval_seconds)
-            current_time = int(time.time())
-            disconnected_clients = []
-            
-            for client_id, client_info in self.connected_clients.items():
-                if client_info.status == "connected" and (current_time - client_info.last_heartbeat > self.heartbeat_timeout_seconds):
-                    client_info.status = "disconnected"
-                    self.logger.warning(f"Client {client_id} ({client_info.client_type}) heartbeat timeout. Marking as 'disconnected'.")
-                    disconnected_clients.append(client_id)
+            now = int(time.time()); clients_to_deregister = []; needs_save = False
+            async with self._lock:
+                for client_id, client_info in self.connected_clients.items():
+                    delta = now - client_info.last_heartbeat
+                    if client_info.status == "connected" and delta > self.heartbeat_timeout_seconds:
+                        client_info.status = "disconnected"
+                        self.logger.warning(f"Client {client_id} timed out -> disconnected."); needs_save = True
+                    elif client_info.status == "disconnected" and delta > self.grace_period_timeout:
+                        self.logger.warning(f"Client {client_id} exceeded grace period -> will be deregistered.")
+                        clients_to_deregister.append(client_id)
+                if needs_save: self._save_clients_nolock()
+            for client_id in clients_to_deregister: await self.deregister_client(client_id)
 
-            if disconnected_clients:
-                self.logger.info(f"Detected {len(disconnected_clients)} disconnected clients. Saving state.")
-                self._save_clients()
-            
     async def start_status_checker(self):
-        """Starts the periodic client status checking task."""
-        if self.status_check_task is None or self.status_check_task.done():
+        if not self.status_check_task or self.status_check_task.done():
             self.status_check_task = asyncio.create_task(self._periodic_status_check())
-            self.logger.info("Client status checking task started.")
+            self.logger.info("Status checker started.")
 
     async def stop_status_checker(self):
-        """Stops the periodic client status checking task and saves client data."""
         if self.status_check_task:
             self.status_check_task.cancel()
-            try:
-                await self.status_check_task
-            except asyncio.CancelledError:
-                self.logger.info("Client status checking task cancelled.")
+            try: await self.status_check_task
+            except asyncio.CancelledError: self.logger.info("Status checker stopped.")
             self.status_check_task = None
-        self._save_clients() # Save data on graceful shutdown
-        
-    def is_client_connected(self, client_id: str) -> bool:
-        """Checks if a client is connected and active."""
-        client_info = self.connected_clients.get(client_id)
-        return client_info and client_info.status == "connected"
+        async with self._lock: self._save_clients_nolock()
 
-    def get_connected_clients_ids(self) -> List[str]:
-        """Returns a list of IDs for all clients currently marked as 'connected'."""
-        return [client_id for client_id, client_info in self.connected_clients.items() if client_info.status == "connected"]
+    def _calculate_client_score(self, c: ClientInfo) -> float:
+        rep_w, up_w, lat_w = 0.6, 0.3, 0.1; norm_rep = c.reputation / 100.0
+        norm_up = min(1.0, (int(time.time()) - c.uptime_start_time) / 3600.0)
+        norm_lat = 1.0 - (min(c.latency, 500) / 500.0)
+        return rep_w * norm_rep + up_w * norm_up + lat_w * norm_lat
 
-    def get_all_clients_info(self) -> Dict[str, Dict[str, Any]]:
-        """Returns detailed information for all clients, including disconnected ones."""
-        return {
-            client_id: info.to_dict()
-            for client_id, info in self.connected_clients.items()
-        }
+    async def get_eligible_clients_count(self) -> int:
+        # Add a strict check at the beginning of the function.
+        if not self.response_system:
+            self.logger.warning("Cannot determine eligible clients: ResponseSystem is not yet set.")
+            return 0
 
-    def get_total_clients_count(self) -> int:
-        """Returns the total number of clients managed by the server (connected and disconnected)."""
-        return len(self.connected_clients)
-
-    def get_connected_clients_count(self) -> int:
-        """Returns the number of clients currently marked as 'connected'."""
-        return len(self.get_connected_clients_ids())
-
-    def get_client_statuses(self) -> Dict[str, Any]:
-        """
-        Returns a dictionary of all managed clients, with their current status.
-        This provides a quick overview for the dashboard.
-        """
-        status_summary = {
-            "total_clients": self.get_total_clients_count(),
-            "connected_clients": 0,
-            "disconnected_clients": 0,
-            "clients": {}
-        }
-
-        for client_id, client_info in self.connected_clients.items():
-            if client_info.status == "connected":
-                status_summary["connected_clients"] += 1
-            elif client_info.status == "disconnected":
-                status_summary["disconnected_clients"] += 1
+        count = 0
+        async with self._lock:
+            for cid, client in self.connected_clients.items():
+                # Now that we know self.response_system exists, this check is safe.
+                is_blocked = self.response_system.is_client_blocked(cid)
+                if client.status == "connected" and client.reputation > 20 and not is_blocked:
+                    count += 1
+        return count
+    
+    async def select_clients_for_round(self, clients_per_round: int) -> List[str]:
+        selected = []
+        async with self._lock:
+            # UPDATED: Added a check to ensure response_system is set before filtering
+            if not self.response_system:
+                self.logger.warning("Response system not set in ClientManager; cannot check for blocked clients.")
+                return []
             
-            status_summary["clients"][client_id] = {
-                "ip_address": client_info.ip_address,
-                "client_type": client_info.client_type,
-                "status": client_info.status,
-                "last_heartbeat": client_info.last_heartbeat,
-                "reputation": client_info.reputation
-            }
-            
-        return status_summary
-
-    def get_status(self) -> Dict[str, Any]:
-        """
-        Returns a summary of the ClientManager's current state.
-        This method is correctly implemented to be called by scpm.py.
-        """
-        return {
-            "total_clients": self.get_total_clients_count(),
-            "connected_clients": self.get_connected_clients_count(),
-            "status_checker_running": self.status_check_task is not None and not self.status_check_task.done()
-        }
-
-    # =================================================================
-    # New methods for Orchestrator to manage clients for a round
-    # =================================================================
-    def select_clients_for_round(self, clients_per_round: int) -> List[str]:
-        """Selects a number of connected clients for the next training round."""
-        connected_clients = self.get_connected_clients_ids()
-        
-        # Filter out clients with low reputation
-        eligible_clients = [c for c in connected_clients if self.connected_clients[c].reputation > 50]
-        
-        if len(eligible_clients) < clients_per_round:
-            self.logger.warning("Not enough eligible clients to start a round.")
-            return []
-        
-        # Use a more robust sampling method, e.g., weighted by reputation if needed.
-        # For now, we'll stick to a simple random sample from eligible clients.
-        selected = random.sample(eligible_clients, clients_per_round)
-        self.clients_in_current_round = selected
-        self.clients_notified_for_round = []
-        self.logger.info(f"Selected {len(selected)} clients for the new round: {selected}")
+            connected_ids = [cid for cid, c in self.connected_clients.items() if c.status == "connected"]
+            eligible_clients = [
+                self.connected_clients[cid] for cid in connected_ids
+                if self.connected_clients[cid].reputation > 50 and not self.response_system.is_client_blocked(cid)
+            ]
+            if len(eligible_clients) < clients_per_round:
+                self.logger.warning(f"Not enough eligible clients: {len(eligible_clients)} available, {clients_per_round} required.")
+                return []
+            eligible_clients.sort(key=lambda c: (c.last_round_participated, -self._calculate_client_score(c)))
+            selected_clients_info = eligible_clients[:clients_per_round]
+            selected = [c.client_id for c in selected_clients_info]
+            self.clients_in_current_round = selected
+            self.clients_notified_for_round = set()
+        self.logger.info(f"Selected {len(selected)} clients for round using fair sorting: {selected}")
         return selected
 
-    def is_client_selected_and_unnotified(self, client_id: str) -> bool:
-        """
-        Checks if the client is selected for the current round and has not yet been notified.
-        """
-        if client_id in self.clients_in_current_round and client_id not in self.clients_notified_for_round:
-            self.clients_notified_for_round.append(client_id)
-            return True
+    def is_client_connected(self, client_id: str) -> bool: return client_id in self.connected_clients and self.connected_clients[client_id].status == "connected"
+    def get_connected_clients_ids(self) -> List[str]: return [cid for cid, c in self.connected_clients.items() if c.status == "connected"]
+    def get_total_clients_count(self) -> int: return len(self.connected_clients)
+    def get_connected_clients_count(self) -> int: return len(self.get_connected_clients_ids())
+
+    async def get_client_statuses(self) -> Dict[str, Any]:
+        async with self._lock:
+            clients_dict = {}
+            # UPDATED: Added a check to ensure response_system is set
+            blocked_clients_details = self.response_system.blocked_clients if self.response_system else {}
+            for cid, c in self.connected_clients.items():
+                client_data = c.to_dict()
+                client_data['is_blocked'] = cid in blocked_clients_details
+                client_data['block_details'] = blocked_clients_details.get(cid)
+                clients_dict[cid] = client_data
+            return {
+                "total_clients": self.get_total_clients_count(), "connected_clients": self.get_connected_clients_count(),
+                "disconnected_clients": sum(1 for c in self.connected_clients.values() if c.status == "disconnected"),
+                "clients": clients_dict,
+            }
+
+    def get_status(self) -> Dict[str, Any]:
+        return {"total_clients": self.get_total_clients_count(), "connected_clients": self.get_connected_clients_count(), "status_checker_running": self.status_check_task is not None and not self.status_check_task.done()}
+
+    async def penalize_client(self, client_id: str, penalty: int = 10):
+        async with self._lock:
+            if client_id in self.connected_clients:
+                c = self.connected_clients[client_id]; c.reputation = max(0, c.reputation - penalty)
+                c.reputation_history.append(c.reputation)
+                self.logger.warning(f"Client {client_id} penalized -> reputation {c.reputation}")
+                self._save_clients_nolock()
+
+    async def record_round_participation(self, client_id: str, round_number: int, global_metrics: Dict[str, Any]):
+        async with self._lock:
+            client_info = self.connected_clients.get(client_id)
+            if not client_info: return
+            client_info.last_round_participated = round_number
+            participation_record = {"round": round_number, "timestamp": datetime.datetime.now().isoformat(), "global_accuracy": global_metrics.get("accuracy"), "global_loss": global_metrics.get("loss")}
+            client_info.participation_history.append(participation_record)
+            self.logger.info(f"Recorded participation for client {client_id} in round {round_number}.")
+            self._save_clients_nolock()
+
+    async def reset_round_clients(self):
+        async with self._lock: self.clients_in_current_round = []; self.clients_notified_for_round = set()
+
+    async def is_client_selected_and_unnotified(self, client_id: str) -> bool:
+        async with self._lock:
+            if client_id in self.clients_in_current_round and client_id not in self.clients_notified_for_round:
+                self.clients_notified_for_round.add(client_id); return True
         return False
 
-    def is_client_in_current_round(self, client_id: str) -> bool:
-        """Checks if a client is part of the current training round."""
-        return client_id in self.clients_in_current_round
-        
-    def penalize_client(self, client_id: str, penalty: int = 10):
-        """Reduces a client's reputation score, useful for ADRM."""
-        if client_id in self.connected_clients:
-            self.connected_clients[client_id].reputation -= penalty
-            if self.connected_clients[client_id].reputation < 0:
-                self.connected_clients[client_id].reputation = 0
-            self.logger.warning(f"Client {client_id} penalized. New reputation: {self.connected_clients[client_id].reputation}")
-            self._save_clients()
-
-    def reset_round_clients(self):
-        """Clears the client selection for the current round."""
-        self.clients_in_current_round = []
-        self.clients_notified_for_round = []
+    def is_client_in_current_round(self, client_id: str) -> bool: return client_id in self.clients_in_current_round

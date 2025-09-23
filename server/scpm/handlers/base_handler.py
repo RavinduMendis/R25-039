@@ -2,7 +2,7 @@ import logging
 from typing import TYPE_CHECKING, Any # Added Any for type hinting
 
 # Import the helper function for JSON file logging and the LoggerAdapter
-from utils.log_manager import add_json_file_handler, ContextAdapter # Assuming utils/log_manager.py exists
+from log_manager.log_manager import add_json_file_handler, ContextAdapter # Assuming utils/log_manager.py exists
 
 # To avoid circular imports if needed and enable type hinting
 if TYPE_CHECKING:

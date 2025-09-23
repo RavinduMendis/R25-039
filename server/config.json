@@ -1,0 +1,38 @@
+{
+  "federated_learning": {
+    "training_rounds": 100,
+    "clients_per_round": 3,
+    "round_timeout_seconds": 1000,
+    "secure_aggregation_threshold": 3,
+    "aggregation_method": "fedadam"
+  },
+  "security": {
+    "tls_enabled": false,
+    "client_authentication_enabled": false,
+    "jwt_secret": "no-key"
+  },
+  "privacy": {
+    "dp": {
+      "epsilon": 1.0,
+      "delta": 1e-5,
+      "sensitivity": 1.0
+    },
+    "he": {
+      "active": true
+    }
+  },
+  "communication": {
+    "grpc": {
+      "port": 50051
+    },
+    "api": {
+      "port": 8080
+    }
+  },
+  "heartbeat_timeout_seconds": 60,
+  "grace_period_timeout": 60,
+  "status_check_interval_seconds": 0,
+  "model_name": "SimpleCNN",
+  "model_save_path": "./database/saved_models",
+  "metrics_log_path": "./database/logs/model_metrics_history.json"
+}

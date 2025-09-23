@@ -1,0 +1,47 @@
+input {
+  file {
+    path => "/home/k0k1s/Downloads/FLF 2.0/server/utils/logs/server.log"
+    start_position => "beginning"
+    sincedb_path => "/dev/null"
+    type => "server-logs"
+  }
+  file {
+    path => "/home/k0k1s/Downloads/FLF 2.0/server/utils/logs/grpchandler.log"
+    start_position => "beginning"
+    sincedb_path => "/dev/null"
+    type => "grpchandler-logs"
+  }
+  file {
+    path => "/home/k0k1s/Downloads/FLF 2.0/server/utils/logs/server_log.json"
+    start_position => "beginning"
+    sincedb_path => "/dev/null"
+    type => "serverjson-logs"
+  }
+}
+
+filter {
+  if [type] == "server-logs" {
+    grok {
+      match => { "message" => "%{TIMESTAMP_ISO8601:timestamp} %{LOGLEVEL:loglevel} %{DATA:class} - %{GREEDYDATA:message}" }
+    }
+  }
+  if [type] == "grpchandler-logs" {
+    grok {
+      match => { "message" => "%{TIMESTAMP_ISO8601:timestamp} %{LOGLEVEL:loglevel} %{DATA:class} - %{GREEDYDATA:message}" }
+    }
+  }
+  if [type] == "serverjson-logs" {
+    json {
+      source => "message"
+    }
+  }
+}
+
+output {
+  elasticsearch {
+    hosts => ["http://localhost:9200"]
+    index => "plain-logs-%{+YYYY.MM.dd}"
+    user => "elastic"
+    password => "PASSWORD"
+  }
+}
