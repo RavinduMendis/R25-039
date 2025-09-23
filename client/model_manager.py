@@ -1,5 +1,3 @@
-# client/client_model_manager.py
-
 import logging
 import torch
 import torch.nn as nn
@@ -8,9 +6,28 @@ from torch.utils.data import DataLoader, Subset
 from typing import Dict, Any, List
 import random
 import os
+import io
 
 # Configure a logger for this module
 logger = logging.getLogger(__name__)
+
+# --- UTILITY FUNCTION ---
+def deserialize_model_state(data: bytes) -> Dict[str, Any]:
+    """
+    Deserializes a byte stream back into a PyTorch model state dictionary.
+    """
+    buffer = io.BytesIO(data)
+    # Load the model state and map it to the CPU to avoid CUDA errors on non-GPU clients
+    return torch.load(buffer, map_location='cpu')
+
+def serialize_model_state(state_dict: Dict[str, Any]) -> bytes:
+    """
+    Serializes a PyTorch model state dictionary into a byte stream.
+    """
+    buffer = io.BytesIO()
+    torch.save(state_dict, buffer)
+    return buffer.getvalue()
+
 
 # --- MODEL DEFINITION ---
 # A simple Convolutional Neural Network for CIFAR-10, identical to the one on the server
@@ -31,87 +48,80 @@ class SimpleCNN(nn.Module):
     def forward(self, x):
         x = self.pool(torch.relu(self.conv1(x)))
         x = self.pool(torch.relu(self.conv2(x)))
-        x = x.view(-1, 16 * 5 * 5)
+        x = torch.flatten(x, 1) # flatten all dimensions except batch
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         x = self.fc3(x)
         return x
 
-# --- CLIENT MODEL MANAGER ---
 class ClientModelManager:
     """
-    Manages the local model and its training process on the client side.
+    Manages the local model, data, and training process for a client.
     """
-    def __init__(self, client_id: str, local_data_size: int = 500):
-        """
-        Initializes the model manager with a client ID and a size for the local dataset.
-        
-        Args:
-            client_id (str): The unique ID of the client.
-            local_data_size (int): The number of samples to use for the local training dataset.
-        """
+
+    def __init__(self, cfg: Dict[str, Any], client_id: str):
+        self.cfg = cfg
         self.client_id = client_id
-        self.logger = logging.getLogger(self.__class__.__name__)
+        # Use a consistent device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = SimpleCNN().to(self.device)
-        self.local_train_loader = self._get_local_data_loader(local_data_size)
-        self.logger.info(f"ClientModelManager initialized on device: {self.device}")
-
-    def _get_local_data_loader(self, local_data_size: int) -> DataLoader:
-        """
-        Loads a local dataset (a subset of CIFAR-10) for training.
-        This simulates a client having a small, local dataset.
-        """
-        # Define the transformations for the dataset
+        
+        # Data preparation (assuming CIFAR-10)
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
+        
+        # Load the training dataset
+        trainset = datasets.CIFAR10(root=self.cfg.get("data_dir", './data'), train=True, download=True, transform=transform)
+        
+        # Randomly select a subset of the data for this client to simulate heterogeneity
+        num_samples = self.cfg.get("num_samples_per_client", 500)
+        all_indices = list(range(len(trainset)))
+        
+        # FIX: Use hash() to get a consistent seed from the client ID string, regardless of its format.
+        random.seed(hash(self.client_id)) 
+        
+        selected_indices = random.sample(all_indices, num_samples)
+        
+        self.local_train_loader = DataLoader(
+            Subset(trainset, selected_indices), 
+            batch_size=self.cfg.get("batch_size", 32), 
+            shuffle=True
+        )
+        
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.info(f"ClientModelManager for {self.client_id} initialized.")
 
-        # Download the full CIFAR-10 dataset
-        try:
-            full_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-        except Exception as e:
-            self.logger.error(f"Failed to download CIFAR-10 dataset: {e}. Aborting data loading.")
-            return None
-
-        # Create a random subset to simulate a client's local data
-        total_data_size = len(full_dataset)
-        if local_data_size > total_data_size:
-            local_data_size = total_data_size
-            self.logger.warning(f"Requested local data size is larger than the full dataset. Using full dataset size: {local_data_size}")
-
-        indices = random.sample(range(total_data_size), local_data_size)
-        local_dataset = Subset(full_dataset, indices)
-        self.logger.info(f"Loaded a local dataset of size {len(local_dataset)} for client {self.client_id}.")
-        return DataLoader(local_dataset, batch_size=16, shuffle=True)
-
-    def train_model(self, global_model_state: Dict[str, Any], epochs: int = 1) -> Dict[str, Any]:
+    def deserialize_model_state(self, data: bytes) -> Dict[str, Any]:
         """
-        Trains the provided global model on the client's local data.
-        Returns the updated state dictionary.
+        Deserializes a byte stream back into a PyTorch model state dictionary.
+        This is now the single point of deserialization for the client.
+        """
+        return deserialize_model_state(data)
+
+    def train_model(self, global_model_state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Trains the local model using the global model state on local data.
         
         Args:
-            global_model_state (Dict[str, Any]): The state dictionary of the global model.
-            epochs (int): The number of local epochs to train for.
-            
+            global_model_state (Dict[str, Any]): The global model state as a dictionary.
+        
         Returns:
-            Dict[str, Any]: The state dictionary of the updated local model.
+            Dict[str, Any]: The updated state dictionary of the local model.
         """
-        if self.local_train_loader is None:
-            self.logger.error("Local data loader is not available. Cannot train model.")
-            return self.model.state_dict() # Return the current, untrianed model state
-
         self.logger.info("Starting local model training.")
         
         # Load the global model state into the local model
         self.model.load_state_dict(global_model_state)
         
         # Set up optimizer and loss function
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, momentum=0.9)
+        # FIX: The learning rate (lr) was changed from 0.01 to 0.001 to prevent divergence.
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.001, momentum=0.9)
         criterion = nn.CrossEntropyLoss()
         
         self.model.train()
+        epochs = self.cfg.get("local_epochs", 1)
         for epoch in range(epochs):
             for i, (images, labels) in enumerate(self.local_train_loader):
                 images, labels = images.to(self.device), labels.to(self.device)

@@ -6,56 +6,42 @@ package fl_service;
 // Service Definitions
 // ===================================================
 
-// Defines the Greeter service with two methods.
+// Defines the Greeter service for the insecure registration channel.
 service Greeter {
-  // A standard RPC for secure, authenticated communication.
-  rpc SayHello (HelloRequest) returns (HelloReply) {}
-
   // A one-time RPC used to register a new client and issue a certificate.
-  // This is intentionally served on an insecure channel.
   rpc RegisterClient (ClientRegistrationRequest) returns (ClientRegistrationResponse) {}
 }
 
-// Define the gRPC service for client-server communication
+// Defines the main gRPC service for secure client-server communication.
 service ClientService {
-  // RPC for client registration
+  // RPC for a client to register with the FL session after mTLS authentication.
   rpc RegisterClient (RegisterClientRequest) returns (RegisterClientResponse);
 
-  // RPC for getting server status
-  rpc GetServerStatus (StatusRequest) returns (StatusResponse);
-
-  // RPC for client heartbeats
+  // RPC for client heartbeats and to check for new training rounds.
   rpc SendHeartbeat (HeartbeatRequest) returns (HeartbeatResponse);
 
   // RPC for a client to fetch the latest global model from the server.
   rpc FetchModel (FetchModelRequest) returns (FetchModelResponse);
 
-  // RPC for a client to send its local model update to the server.
+  // RPC for a client to send its local model update (using HE).
   rpc SendModelUpdate (SendModelUpdateRequest) returns (SendModelUpdateResponse);
+  
+  // RPC for a client to send its secret shares to the server (using SSS).
+  rpc SendModelUpdateShares (SendModelUpdateSharesRequest) returns (SendModelUpdateSharesResponse);
 }
 
 // ===================================================
 // Message Definitions
 // ===================================================
 
-// Request message for the SayHello RPC.
-message HelloRequest {
-  string name = 1;
-}
-
-// Response message for the SayHello RPC.
-message HelloReply {
-  string message = 1;
-}
-
-// Request message for the RegisterClient RPC.
+// Request for the one-time insecure registration to get a certificate.
 message ClientRegistrationRequest {
   string client_id = 1;
   bytes certificate_signing_request = 2;
   string registration_token = 3;
 }
 
-// Response message for the RegisterClient RPC.
+// Response for the one-time insecure registration.
 message ClientRegistrationResponse {
   bool success = 1;
   string message = 2;
@@ -63,30 +49,19 @@ message ClientRegistrationResponse {
   bytes ca_certificate = 4;
 }
 
-// Message for client registration request
+// Request for registering with the FL session on the secure channel.
 message RegisterClientRequest {
   string client_id = 1;
   string client_info = 2;
 }
 
-// Message for client registration response
+// Response for registering with the FL session on the secure channel.
 message RegisterClientResponse {
   bool success = 1;
   string message = 2;
 }
 
-// Message for server status request
-message StatusRequest {
-  string client_id = 1;
-}
-
-// Message for server status response
-message StatusResponse {
-  string server_status = 1;
-  int32 connected_clients_count = 2;
-}
-
-// Heartbeat messages
+// Heartbeat messages.
 message HeartbeatRequest {
   string client_id = 1;
   int64 timestamp = 2;
@@ -96,11 +71,10 @@ message HeartbeatResponse {
   bool success = 1;
   string message = 2;
   int64 server_timestamp = 3;
-  // This new field signals the client to start a training round.
   bool new_round_available = 4;
 }
 
-// Messages for model fetching
+// Messages for model fetching.
 message FetchModelRequest {
   string client_id = 1;
 }
@@ -111,13 +85,27 @@ message FetchModelResponse {
   bytes model_data = 3;
 }
 
-// Messages for sending model updates
+// Messages for sending HE-encrypted model updates.
 message SendModelUpdateRequest {
   string client_id = 1;
   bytes model_update = 2;
+  string privacy_method = 3; // Can be "HE" or "Normal"
 }
 
 message SendModelUpdateResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// **FIXED**: Messages for sending model updates as individual secret shares.
+message SendModelUpdateSharesRequest {
+  string client_id = 1;
+  int32 share_index = 2;    // The index of this specific share (e.g., 0, 1, 2).
+  int32 total_shares = 3;   // The total number of shares created for this update.
+  bytes share_data = 4;     // The byte content of this individual share.
+}
+
+message SendModelUpdateSharesResponse {
   bool success = 1;
   string message = 2;
 }
