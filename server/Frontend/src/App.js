@@ -1,146 +1,181 @@
-// App.js
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom';
+import { Box, CssBaseline, Drawer, AppBar, Toolbar, Typography, List, ListItem, ListItemButton, ListItemIcon, ListItemText, IconButton, Button, Menu, MenuItem } from '@mui/material';
+import DashboardIcon from '@mui/icons-material/Dashboard';
+import BarChartIcon from '@mui/icons-material/BarChart';
+import PeopleIcon from '@mui/icons-material/People';
+import DnsIcon from '@mui/icons-material/Dns';
+import DescriptionIcon from '@mui/icons-material/Description';
+import InfoIcon from '@mui/icons-material/Info';
+import LanguageIcon from '@mui/icons-material/Language'; 
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'; 
-
-// Import layout components
-import Header from './components/Header';
-import SideNavigation from './components/SideNavigation'; 
-
-// Import page components from the new 'pages' directory
+// --- Import Real Page Components ---
 import DashboardPage from './pages/DashboardPage';
-import MetricsPage from './pages/MetricsPage.js';
+import PerformancePage from './pages/PerformancePage';
 import ClientsPage from './pages/ClientsPage';
+import SystemHealthPage from './pages/SystemHealthPage';
 import LogsPage from './pages/LogsPage';
-import ModuleStatusPage from './pages/ModuleStatusPage';
 
-// Import API functions
-import { 
-  fetchServerStatus, 
-  fetchOverview, 
-  fetchModelMetrics, 
-  fetchClientHealth, 
-  fetchLogs,
-  fetchModuleStatus 
-} from './api';
+const drawerWidth = 240;
+const appTitle = ""; // Federated Learning Analytics & Monitoring Environment
 
-// Import global CSS
-import './App.css'; 
+const navItems = [
+  { text: 'Dashboard', icon: <DashboardIcon />, path: '/' },
+  { text: 'Performance', icon: <BarChartIcon />, path: '/performance' },
+  { text: 'Clients', icon: <PeopleIcon />, path: '/clients' },
+  { text: 'System Health', icon: <DnsIcon />, path: '/system-health' },
+  { text: 'Logs', icon: <DescriptionIcon />, path: '/logs' },
+];
 
-function App() {
-  // All top-level state for global data remains here,
-  // as multiple pages might need access to it.
-  const [serverStatus, setServerStatus] = useState(null);
-  const [overviewData, setOverviewData] = useState(null);
-  const [modelMetrics, setModelMetrics] = useState([]);
-  const [clientHealth, setClientHealth] = useState(null); // Keep as null initially to represent the full object
-  const [logs, setLogs] = useState([]);
-  const [moduleStatuses, setModuleStatuses] = useState({
-    mm: null,
-    sam: null,
-    adrm: null,
-    ppm: null,
-    scpm: null, // SCPM status combined from serverStatus and overviewData
-  });
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+/**
+ * Component to display the current time and date, plus header buttons.
+ */
+const SystemInfo = () => {
+  const [currentDateTime, setCurrentDateTime] = useState(new Date());
+  const [anchorEl, setAnchorEl] = useState(null);
+  const open = Boolean(anchorEl);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true); 
-    setError(null);
-    try {
-      const [
-        statusRes, 
-        overviewRes, 
-        metricsRes, 
-        clientRes, 
-        logsRes,
-        mmStatusRes,
-        samStatusRes,
-        adrmStatusRes,
-        ppmStatusRes
-      ] = await Promise.all([
-        fetchServerStatus(),
-        fetchOverview(),
-        fetchModelMetrics(),
-        fetchClientHealth(),
-        fetchLogs(),
-        fetchModuleStatus('mm'),
-        fetchModuleStatus('sam'),
-        fetchModuleStatus('adrm'),
-        fetchModuleStatus('ppm')
-      ]);
-
-      setServerStatus(statusRes.data.data);
-      setOverviewData(overviewRes.data.data);
-      setModelMetrics(metricsRes.data.data);
-      // CORRECTED: Extract the clients object and pass it to the state
-      setClientHealth(clientRes.data.data);
-      setLogs(logsRes.data.data);
-      setModuleStatuses(prev => ({
-        ...prev,
-        mm: mmStatusRes.data.data,
-        sam: samStatusRes.data.data,
-        adrm: adrmStatusRes.data.data,
-        ppm: ppmStatusRes.data.data,
-        // SCPM status is derived from general server status and overview
-        scpm: { 
-          server_status_text: statusRes.data.data.server_status,
-          connected_clients: statusRes.data.data.connected_clients,
-          server_ready: statusRes.data.data.server_ready,
-          current_round: overviewRes.data.data.current_round,
-          updates_in_queue: overviewRes.data.data.updates_in_queue,
-          last_aggregation_time: overviewRes.data.data.last_aggregation_time
-        }
-      }));
-    } catch (err) {
-      setError("Failed to fetch dashboard data: " + err.message);
-      console.error("Dashboard fetch error:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // Use current time and date based on the user's location (Sri Lanka)
+  const timeOptions = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true };
+  const dateOptions = { year: 'numeric', month: 'short', day: 'numeric' };
 
   useEffect(() => {
-    fetchData();
-    // Poll for updates every 5 seconds
-    const interval = setInterval(fetchData, 5000); 
-    return () => clearInterval(interval); 
-  }, [fetchData]);
+    const timer = setInterval(() => {
+      setCurrentDateTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
-  // Conditional rendering for loading and error states
-  if (loading) return <div className="dashboard-loading">Loading Dashboard...</div>;
-  if (error) return <div className="dashboard-error">{error}</div>;
+  const handleMenuOpen = (event) => {
+    setAnchorEl(event.currentTarget);
+  };
+
+  const handleMenuClose = () => {
+    setAnchorEl(null);
+  };
+
+  // Set the locale to 'en-US' or another preferred format
+  const formattedTime = currentDateTime.toLocaleTimeString('en-US', timeOptions);
+  const formattedDate = currentDateTime.toLocaleDateString('en-US', dateOptions);
 
   return (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+      {/* Time and Date Display */}
+      <Typography variant="body2" color="inherit">
+        {formattedDate} | {formattedTime}
+      </Typography>
+
+      {/* Visit Website Button */}
+      <Button
+        component="a" 
+        href="https://k0k1s.github.io/r25-039" // Update this URL!
+        target="_blank" 
+        rel="noopener noreferrer"
+        color="inherit"
+        startIcon={<LanguageIcon />}
+        sx={{ textTransform: 'none' }}
+      >
+        Website
+      </Button>
+
+      {/* About Section */}
+      <Button
+        id="about-button"
+        aria-controls={open ? 'about-menu' : undefined}
+        aria-haspopup="true"
+        aria-expanded={open ? 'true' : undefined}
+        onClick={handleMenuOpen}
+        color="inherit"
+        startIcon={<InfoIcon />}
+        sx={{ textTransform: 'none' }}
+      >
+        About
+      </Button>
+      <Menu
+        id="about-menu"
+        anchorEl={anchorEl}
+        open={open}
+        onClose={handleMenuClose}
+        MenuListProps={{
+          'aria-labelledby': 'about-button',
+        }}
+      >
+        <MenuItem onClick={handleMenuClose}>Version: 1.0.0</MenuItem>
+      </Menu>
+    </Box>
+  );
+};
+
+
+function App() {
+  return (
     <Router>
-      <div className="dashboard-container"> 
-        <Header /> 
-        <div className="content-wrapper"> {/* New wrapper for side-nav and main-content */}
-          <SideNavigation /> 
-          <main className="main-content">
-            <Routes>
-              <Route 
-                path="/" 
-                element={
-                  <DashboardPage 
-                    serverStatus={serverStatus} 
-                    overviewData={overviewData} 
-                    modelMetrics={modelMetrics} 
-                    clientHealth={clientHealth} // Pass the full object here
-                    logs={logs} 
-                    moduleStatuses={moduleStatuses} 
-                  />
-                } 
+      <Box sx={{ display: 'flex' }}>
+        <CssBaseline />
+        <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1, background: '#0d1b2a' }}>
+          <Toolbar sx={{ display: 'flex', justifyContent: 'space-between' }}>
+            
+            {/* Left Section: Logo and Title */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              {/* LOGO: Correctly referencing the /public/logo.png file */}
+              <img 
+                src={`${process.env.PUBLIC_URL}/logo.png`} 
+                alt="F.L.A.M.E Logo" 
+                style={{ height: 60 }} 
               />
-              <Route path="/metrics" element={<MetricsPage modelMetrics={modelMetrics} />} />
-              <Route path="/clients" element={<ClientsPage clientHealth={clientHealth} />} /> // Pass the full object here
-              <Route path="/logs" element={<LogsPage logs={logs} />} />
-              <Route path="/modules" element={<ModuleStatusPage moduleStatuses={moduleStatuses} />} />
-            </Routes>
-          </main>
-        </div> {/* End content-wrapper */}
-      </div>
+              <Typography variant="h5" noWrap component="div" sx={{ fontWeight: 600 }}>
+                {appTitle}
+              </Typography>
+            </Box>
+
+            {/* Right Section: System Info (Time, Date, Website, About) */}
+            <SystemInfo />
+
+          </Toolbar>
+        </AppBar>
+        <Drawer
+          variant="permanent"
+          sx={{
+            width: drawerWidth,
+            flexShrink: 0,
+            [`& .MuiDrawer-paper`]: { width: drawerWidth, boxSizing: 'border-box' },
+          }}
+        >
+          <Toolbar />
+          <Box sx={{ overflow: 'auto' }}>
+            <List>
+              {navItems.map((item) => (
+                <ListItem key={item.text} disablePadding>
+                  <ListItemButton component={NavLink} to={item.path} 
+                    sx={{
+                        '&.active': {
+                            backgroundColor: 'rgba(25, 118, 210, 0.08)',
+                            borderRight: '3px solid #1976d2',
+                            color: '#1976d2',
+                            '& .MuiListItemIcon-root': {
+                                color: '#1976d2'
+                            }
+                        }
+                    }}>
+                    <ListItemIcon>{item.icon}</ListItemIcon>
+                    <ListItemText primary={item.text} />
+                  </ListItemButton>
+                </ListItem>
+              ))}
+            </List>
+          </Box>
+        </Drawer>
+        <Box component="main" sx={{ flexGrow: 1, p: 3, background: '#f4f6f8', minHeight: '100vh' }}>
+          <Toolbar />
+          <Routes>
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/performance" element={<PerformancePage />} />
+            <Route path="/clients" element={<ClientsPage />} />
+            <Route path="/system-health" element={<SystemHealthPage />} />
+            <Route path="/logs" element={<LogsPage />} />
+          </Routes>
+        </Box>
+      </Box>
     </Router>
   );
 }

@@ -86,6 +86,7 @@ class Orchestrator:
         self.model_shares: Dict[str, Dict[int, bytes]] = {}
         self.round_start_time = 0.0
         self.round_duration = 0.0
+        self.aggregation_duration = 0.0 # NEW: Dedicated aggregation time
         self.last_aggregation_time = 0.0
         self.state = OrchestratorState.IDLE
         self.aggregation_task = None
@@ -288,6 +289,9 @@ class Orchestrator:
         self.state = OrchestratorState.AGGREGATING
         self.logger.info("============== AGGREGATION PROCESS STARTED ==============")
 
+        # FIX: Start the timer for the aggregation process itself
+        aggregation_start_time = time.time()
+
         try:
             if len(self.model_updates) < self.min_clients_for_round:
                 self.logger.warning(f"Aggregation aborted. Only {len(self.model_updates)}/{self.min_clients_for_round} (min) updates available.")
@@ -336,9 +340,14 @@ class Orchestrator:
             self.model_manager.update_global_model(aggregated_model)
             self.logger.info("AGGREGATION STEP 3.3: Global model updated.")
 
-            self.last_aggregation_time = time.time()
+            # FIX: Calculate both aggregation time and total round duration
+            aggregation_end_time = time.time()
+            self.aggregation_duration = aggregation_end_time - aggregation_start_time
+            self.last_aggregation_time = aggregation_end_time # End time of the round
             self.round_duration = self.last_aggregation_time - self.round_start_time
-            self.logger.info(f"AGGREGATION STEP 4.1: Aggregation for round {self.current_round_number} complete. Duration: {self.round_duration:.2f}s")
+
+            self.logger.info(f"AGGREGATION STEP 4.1: Aggregation for round {self.current_round_number} complete. "
+                             f"Total Round Duration: {self.round_duration:.2f}s | Aggregation Time: {self.aggregation_duration:.2f}s")
             
             metrics = self.model_manager.evaluate_model()
 
@@ -389,6 +398,7 @@ class Orchestrator:
             "last_aggregation_time": datetime.datetime.fromtimestamp(self.last_aggregation_time).strftime("%Y-%m-%d %H:%M:%S") if self.last_aggregation_time > 0 else "N/A", 
             "last_aggregation_timestamp": self.last_aggregation_time, 
             "round_duration_seconds": self.round_duration, 
+            "aggregation_duration_seconds": self.aggregation_duration, # NEW: The true aggregation time
             "selected_clients_count": len(self.current_round_clients), 
             "selected_clients": list(self.current_round_clients), 
             "updates_received": len(self.model_updates), 

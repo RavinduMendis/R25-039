@@ -1,34 +1,41 @@
 import React from 'react';
-import './ModuleStatusCard.css'; 
+import { Card, CardContent, Typography, Box, Divider, CircularProgress } from '@mui/material';
 
-function ModuleStatusCard({ title, data, type }) {
-  if (!data) return null;
-
-  // Custom rendering for SCPM specific data
-  if (type === 'scpm') {
+const ModuleStatusCard = ({ title, data }) => {
+  // ADDED: This guard clause prevents the component from crashing.
+  // If data is null or undefined, it renders nothing.
+  if (!data) {
     return (
-      <div className="card module-status-card scpm-card">
-        <h3>{title}</h3>
-        <p>Server Status: <span className={data.server_ready ? 'status-online' : 'status-offline'}>{data.server_ready ? 'Online' : 'Offline'}</span></p>
-        <p>Connected Clients: {data.connected_clients}</p>
-        <p>Current Round: {data.current_round}</p>
-        <p>Updates in Queue: {data.updates_in_queue}</p>
-        <p>Last Aggregation: {data.last_aggregation_time}</p>
-      </div>
+        <Card elevation={2}>
+            <CardContent>
+                <Typography variant="h6" gutterBottom>{title}</Typography>
+                <Divider sx={{ mb: 2 }} />
+                <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 100 }}>
+                    <CircularProgress size={24} />
+                </Box>
+            </CardContent>
+        </Card>
     );
   }
 
-  // Generic rendering for other modules
   return (
-    <div className="card module-status-card">
-      <h3>{title}</h3>
-      {Object.entries(data).map(([key, value]) => (
-        <p key={key}>
-          <strong>{key.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase())}:</strong> {String(value)}
-        </p>
-      ))}
-    </div>
+    <Card elevation={2}>
+      <CardContent>
+        <Typography variant="h6" gutterBottom>{title}</Typography>
+        <Divider sx={{ mb: 2 }} />
+        {Object.entries(data).map(([key, value]) => (
+          <Box key={key} sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
+            <Typography variant="body2" color="text.secondary">
+              {key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+            </Typography>
+            <Typography variant="body2" sx={{ fontWeight: 'bold' }}>
+              {String(value)}
+            </Typography>
+          </Box>
+        ))}
+      </CardContent>
+    </Card>
   );
-}
+};
 
 export default ModuleStatusCard;

@@ -26,9 +26,15 @@ class ModelManager:
         """
         self.logger = logging.getLogger(self.__class__.__name__)
         self.cfg = cfg # Store the configuration dictionary
+        
+        # --- FIX 1: Load data and get dimensions (input_size, num_classes) FIRST ---
+        # load_cifar10_test_data is aliased to load_wustl_iiot_test_data, which returns 
+        # (DataLoader, num_features, num_classes)
+        self.cifar10_test_loader, self.input_size, self.num_classes = load_cifar10_test_data()
+        
+        # Now, load_model() can access self.input_size and self.num_classes
         self.global_model = self.load_model()
         self.global_model_version = 0
-        self.cifar10_test_loader = load_cifar10_test_data()
 
         # New attributes for model convergence checking
         self.best_accuracy = 0.0
@@ -91,17 +97,19 @@ class ModelManager:
 
     def load_model(self):
         """
-        Loads the appropriate model based on the configuration.
+        Loads the appropriate model based on the configuration, passing required dimensions.
         """
         self.logger.info("Loading initial global model.")
         
         model_name = self.cfg.get('model_name', 'SimpleCNN')
 
         if model_name == 'SimpleCNN':
-            return SimpleCNN()
+            # --- FIX 2: Pass input_size and num_classes to the model constructor ---
+            return SimpleCNN(input_size=self.input_size, num_classes=self.num_classes)
         else:
             self.logger.error(f"Unknown model name '{model_name}'. Falling back to SimpleCNN.")
-            return SimpleCNN()
+            # Ensure fallback model also gets dimensions
+            return SimpleCNN(input_size=self.input_size, num_classes=self.num_classes)
 
     def evaluate_model(self) -> Dict[str, float]:
         """Evaluates the current global model on the CIFAR-10 test set and returns metrics."""
@@ -111,6 +119,11 @@ class ModelManager:
         loss = 0.0
         criterion = nn.CrossEntropyLoss()
         
+        # Check if loader is available before evaluation
+        if self.cifar10_test_loader is None:
+            self.logger.error("Test data loader is None. Cannot perform evaluation.")
+            return {"accuracy": 0.0, "loss": 0.0}
+            
         with torch.no_grad():
             for images, labels in self.cifar10_test_loader:
                 outputs = self.global_model(images)

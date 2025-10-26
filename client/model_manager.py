@@ -1,17 +1,22 @@
+# client_model_manager.py
+
 import logging
 import torch
 import torch.nn as nn
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset
 from typing import Dict, Any, List
 import random
-import os
 import io
+import os
+import pandas as pd
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+import numpy as np
+import torch.nn.functional as F
 
 # Configure a logger for this module
 logger = logging.getLogger(__name__)
 
-# --- UTILITY FUNCTION ---
+# --- UTILITY FUNCTIONS ---
 def deserialize_model_state(data: bytes) -> Dict[str, Any]:
     """
     Deserializes a byte stream back into a PyTorch model state dictionary.
@@ -29,101 +34,142 @@ def serialize_model_state(state_dict: Dict[str, Any]) -> bytes:
     return buffer.getvalue()
 
 
-# --- MODEL DEFINITION ---
-# A simple Convolutional Neural Network for CIFAR-10, identical to the one on the server
-class SimpleCNN(nn.Module):
-    """
-    A simple Convolutional Neural Network for CIFAR-10.
-    This architecture must be identical to the one on the server.
-    """
-    def __init__(self):
-        super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16 * 5 * 5, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+# --- MODEL DEFINITION: SimpleFCN for WUSTL-IIoT-2021 (Matches Server's common_model.py) ---
+class SimpleFCN(nn.Module):
+    """A simple Fully Connected Network (FCN) for WUSTL-IIoT-2021 tabular data."""
+    # NOTE: The server's common_model.py aliases SimpleFCN to SimpleCNN,
+    # but the client must use the explicit FCN structure with dimensions.
+    def __init__(self, input_size: int = 41, num_classes: int = 2): 
+        super(SimpleFCN, self).__init__()
+        # Define layers based on expected input/output dimensions from data_loader.py
+        self.fc1 = nn.Linear(input_size, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, num_classes) # Final layer size is num_classes
 
     def forward(self, x):
-        x = self.pool(torch.relu(self.conv1(x)))
-        x = self.pool(torch.relu(self.conv2(x)))
-        x = torch.flatten(x, 1) # flatten all dimensions except batch
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
+        # x is a 1D feature vector for each sample
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return x
+    
+# --- Data Loading (Matches Server's data_loader.py logic) ---
+
+class IIoTDataset(Dataset):
+    """Custom Dataset for WUSTL-IIoT-2021 tabular data."""
+    def __init__(self, features, labels):
+        self.features = torch.tensor(features, dtype=torch.float32)
+        self.labels = torch.tensor(labels, dtype=torch.long)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return self.features[idx], self.labels[idx]
+
+def load_wustl_iiot_train_data(cfg: Dict[str, Any], client_id: str):
+    """
+    Loads, preprocesses, and prepares a randomized subset of WUSTL-IIoT-2021 
+    data for a specific client.
+    """
+    file_path = cfg.get("data_file_path", './data/WUSTL_IIoT_2021.csv')
+    
+    if not os.path.exists(file_path):
+        logger.error(f"Dataset file not found at: {file_path}. Cannot load client data.")
+        return None, 41, 2 
+
+    df = pd.read_csv(file_path)
+    
+    # Preprocessing (must match the server's data_loader.py)
+    columns_to_drop = ['StartTime', 'LastTime', 'SrcAddr', 'DstAddr', 'sIpId', 'dIpId']
+    df = df.drop(columns=columns_to_drop, errors='ignore')
+    
+    label_column = df.columns[-1] 
+    X = df.drop(columns=[label_column])
+    y = df[label_column]
+    
+    numeric_cols = X.select_dtypes(include=np.number).columns
+    X_numeric = X[numeric_cols]
+    
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_numeric)
+    
+    le = LabelEncoder()
+    y_encoded = le.fit_transform(y)
+    
+    # --- Client-Specific Data Partitioning ---
+    num_samples = cfg.get("num_samples_per_client", 500)
+    
+    # Use the entire processed dataset for sampling
+    full_dataset = IIoTDataset(X_scaled, y_encoded)
+    all_indices = list(range(len(full_dataset)))
+    
+    # Use hash() for a consistent, client-specific seed
+    random.seed(hash(client_id)) 
+    
+    # Sample a subset of indices for this client
+    selected_indices = random.sample(all_indices, min(num_samples, len(full_dataset)))
+    
+    # Create the client's subset
+    client_subset = torch.utils.data.Subset(full_dataset, selected_indices)
+    
+    num_features = X_scaled.shape[1] 
+    num_classes = len(np.unique(y_encoded))
+    
+    logger.info(f"Client {client_id} loaded {len(client_subset)} samples. Features={num_features}, Classes={num_classes}")
+    
+    return DataLoader(client_subset, batch_size=cfg.get("batch_size", 32), shuffle=True), num_features, num_classes
+
 
 class ClientModelManager:
     """
-    Manages the local model, data, and training process for a client.
+    Manages the local model, data, and training process for a client 
+    using the WUSTL-IIoT SimpleFCN architecture.
     """
 
     def __init__(self, cfg: Dict[str, Any], client_id: str):
         self.cfg = cfg
         self.client_id = client_id
-        # Use a consistent device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = SimpleCNN().to(self.device)
         
-        # Data preparation (assuming CIFAR-10)
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-        ])
+        # Load the client's data
+        self.local_train_loader, num_features, num_classes = load_wustl_iiot_train_data(cfg, client_id)
         
-        # Load the training dataset
-        trainset = datasets.CIFAR10(root=self.cfg.get("data_dir", './data'), train=True, download=True, transform=transform)
-        
-        # Randomly select a subset of the data for this client to simulate heterogeneity
-        num_samples = self.cfg.get("num_samples_per_client", 500)
-        all_indices = list(range(len(trainset)))
-        
-        # FIX: Use hash() to get a consistent seed from the client ID string, regardless of its format.
-        random.seed(hash(self.client_id)) 
-        
-        selected_indices = random.sample(all_indices, num_samples)
-        
-        self.local_train_loader = DataLoader(
-            Subset(trainset, selected_indices), 
-            batch_size=self.cfg.get("batch_size", 32), 
-            shuffle=True
-        )
+        # Initialize the FCN model with determined dimensions
+        self.model = SimpleFCN(input_size=num_features, num_classes=num_classes).to(self.device)
         
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.info(f"ClientModelManager for {self.client_id} initialized.")
+        self.logger.info(f"ClientModelManager for {self.client_id} initialized with SimpleFCN.")
 
     def deserialize_model_state(self, data: bytes) -> Dict[str, Any]:
         """
         Deserializes a byte stream back into a PyTorch model state dictionary.
-        This is now the single point of deserialization for the client.
         """
         return deserialize_model_state(data)
 
     def train_model(self, global_model_state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Trains the local model using the global model state on local data.
-        
-        Args:
-            global_model_state (Dict[str, Any]): The global model state as a dictionary.
-        
-        Returns:
-            Dict[str, Any]: The updated state dictionary of the local model.
         """
-        self.logger.info("Starting local model training.")
+        if self.local_train_loader is None:
+            self.logger.error("Training skipped: Data loader failed to initialize.")
+            return self.model.state_dict()
+            
+        self.logger.info("Starting local model training on WUSTL-IIoT data.")
         
-        # Load the global model state into the local model
         self.model.load_state_dict(global_model_state)
         
-        # Set up optimizer and loss function
-        # FIX: The learning rate (lr) was changed from 0.01 to 0.001 to prevent divergence.
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.001, momentum=0.9)
+        # Setup for FCN/Tabular Data Training
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=self.cfg.get("client_lr", 0.001), momentum=0.9)
         criterion = nn.CrossEntropyLoss()
         
         self.model.train()
         epochs = self.cfg.get("local_epochs", 1)
+        last_loss = 0.0
+        
         for epoch in range(epochs):
-            for i, (images, labels) in enumerate(self.local_train_loader):
+            for images, labels in self.local_train_loader:
+                # The input data is now a 1D feature vector per sample
                 images, labels = images.to(self.device), labels.to(self.device)
                 
                 optimizer.zero_grad()
@@ -131,15 +177,13 @@ class ClientModelManager:
                 loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
+                last_loss = loss.item()
         
-        self.logger.info(f"Local model training finished after {epochs} epochs. Final loss: {loss.item():.4f}")
+        self.logger.info(f"Local model training finished after {epochs} epochs. Final loss: {last_loss:.4f}")
         return self.model.state_dict()
 
     def get_model_state(self) -> Dict[str, Any]:
         """
         Returns the current state dictionary of the local model.
-        
-        Returns:
-            Dict[str, Any]: The state dictionary of the local model.
         """
         return self.model.state_dict()

@@ -136,10 +136,13 @@ class ServerControlPlaneManager:
         self.update_current_round(training_stats.get("current_round", 0))
         self.update_round_duration(training_stats.get("round_duration_seconds", 0.0))
         
-        # We assume the Orchestrator provides these stats after aggregation,
-        # so we update the last aggregation time and queue size
-        self.update_last_aggregation_time(time.time())
-        self.update_updates_in_queue(training_stats.get("queue_size", 0))
+        # We assume the Orchestrator provides these stats after aggregation.
+        # FIX: Use the raw timestamp from the Orchestrator for the source of truth for last aggregation time.
+        last_agg_ts = training_stats.get("last_aggregation_timestamp", self._last_aggregation_time)
+        self.update_last_aggregation_time(last_agg_ts)
+
+        # Using "updates_received" to align with Orchestrator's key, not 'queue_size'
+        self.update_updates_in_queue(training_stats.get("updates_received", 0))
         self.update_client_count(training_stats.get("selected_clients_count", 0))
         
         self.logger.info(f"Received updated training stats for round {self._current_round}")
@@ -154,6 +157,44 @@ class ServerControlPlaneManager:
     async def get_dashboard_update(self):
         """Waits for and returns the next dashboard update from the queue."""
         return await self.dashboard_data_queue.get()
+
+    def _get_log_file_size_kb(self) -> int:
+        """Returns the size of the main server log file in kilobytes."""
+        try:
+            log_path = os.path.join(LOG_DIR, "server.log")
+            if os.path.exists(log_path):
+                size_bytes = os.path.getsize(log_path)
+                return size_bytes // 1024
+            else:
+                return 0
+        except Exception as e:
+            self.logger.error(f"Error getting log file size: {e}", exc_info=True)
+            return 0
+            
+    def _format_time_difference(self, delta_seconds: float) -> str:
+        """
+        Formats a time difference (in seconds) into a human-readable string.
+        This replaces the faulty calculation that occurred outside of SCPM.
+        """
+        if delta_seconds <= 0:
+            return "Just now"
+        
+        seconds = int(delta_seconds)
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        days, hours = divmod(hours, 24)
+        years, days = divmod(days, 365)
+        
+        if years > 0:
+            return f"{years}y ago"
+        elif days > 0:
+            return f"{days}d ago"
+        elif hours > 0:
+            return f"{hours}h ago"
+        elif minutes > 0:
+            return f"{minutes}m ago"
+        else:
+            return f"{seconds}s ago"
 
     def get_full_status(self) -> Dict[str, Any]:
         """
@@ -188,19 +229,6 @@ class ServerControlPlaneManager:
         """
         return self.get_full_status()
 
-    def _get_log_file_size_kb(self) -> int:
-        """Returns the size of the main server log file in kilobytes."""
-        try:
-            log_path = os.path.join(LOG_DIR, "server.log")
-            if os.path.exists(log_path):
-                size_bytes = os.path.getsize(log_path)
-                return size_bytes // 1024
-            else:
-                return 0
-        except Exception as e:
-            self.logger.error(f"Error getting log file size: {e}", exc_info=True)
-            return 0
-
     def update_current_round(self, round_number: int):
         """Updates the internal state with the current training round number."""
         self._current_round = round_number
@@ -230,14 +258,30 @@ class ServerControlPlaneManager:
         """
         Returns a summary of the federated training process.
         This method is a core part of the dashboard API.
+        
+        FIX: Adds the time difference calculation directly here for a robust overview.
         """
         if self.orchestrator:
-            return self.orchestrator.get_training_stats()
+            stats = self.orchestrator.get_training_stats()
+            
+            # Calculate and format the time since last aggregation using the raw timestamp
+            last_agg_ts = stats.get("last_aggregation_timestamp", 0.0)
+            current_time_ts = time.time()
+            time_diff = current_time_ts - last_agg_ts
+
+            stats["server_timestamp"] = current_time_ts
+            stats["time_since_last_aggregation_formatted"] = self._format_time_difference(time_diff)
+            
+            return stats
         
         return {
             "current_round": 0, "total_rounds": 0, "last_aggregation_time": "N/A",
             "round_duration_seconds": 0.0, "selected_clients_count": 0,
-            "selected_clients": [], "queue_size": 0, "status": "Orchestrator not initialized."
+            "selected_clients": [], 
+            "updates_received": 0, # Corrected key from 'queue_size' to 'updates_received'
+            "current_state": "Orchestrator not initialized.",
+            "server_timestamp": time.time(),
+            "time_since_last_aggregation_formatted": "N/A"
         }
     
     def get_all_clients(self) -> Dict[str, Any]:

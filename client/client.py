@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 CLIENT_ID_FILE = "client_id.txt"
 CERT_DIR = os.path.join(current_dir, "cscpm", "certifications")
 API_PORT = 8000
-HEARTBEAT_INTERVAL = 5 # seconds
+HEARTBEAT_INTERVAL = 1 # seconds
 
 # --- Privacy Preferences API (for dash.py) ---
 class PrivacyPreferences:

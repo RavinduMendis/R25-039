@@ -2,7 +2,7 @@
   "federated_learning": {
     "training_rounds": 100,
     "clients_per_round": 3,
-    "round_timeout_seconds": 1000,
+    "round_timeout_seconds": 100000,
     "secure_aggregation_threshold": 3,
     "aggregation_method": "fedadam"
   },

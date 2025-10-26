@@ -77,9 +77,9 @@ class ClientManager:
         self.connected_clients: Dict[str, ClientInfo] = {}
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger = ContextAdapter(self.logger, {"component": self.__class__.__name__})
-        self.heartbeat_timeout_seconds = self.cfg.get("heartbeat_timeout_seconds", 20)
+        self.heartbeat_timeout_seconds = self.cfg.get("heartbeat_timeout_seconds", 10)
         self.grace_period_timeout = self.cfg.get("grace_period_timeout", 300)
-        self.status_check_interval_seconds = self.cfg.get("status_check_interval_seconds", 5)
+        self.status_check_interval_seconds = self.cfg.get("status_check_interval_seconds", 1)
         self.status_check_task = None
         self.clients_in_current_round: List[str] = []
         self.clients_notified_for_round: Set[str] = set()

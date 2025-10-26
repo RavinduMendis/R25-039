@@ -157,8 +157,12 @@ class ApiHandler:
         queue_size = await self._ensure_awaited(self.orchestrator.get_queue_size())
         
         current_time = time.time()
+        
+        # FIX: Correctly retrieve the timestamp and perform the check separately.
+        last_agg_ts = training_stats.get("last_aggregation_timestamp", 0.0)
         time_since_last_agg_formatted = "No aggregation yet"
-        if last_agg_ts := training_stats.get("last_aggregation_timestamp", 0.0) > 0:
+        
+        if last_agg_ts > 0:
             time_since_last_agg = current_time - last_agg_ts
             if time_since_last_agg < 60:
                 time_since_last_agg_formatted = f"{int(time_since_last_agg)}s ago"
