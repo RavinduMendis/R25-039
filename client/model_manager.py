@@ -34,23 +34,38 @@ def serialize_model_state(state_dict: Dict[str, Any]) -> bytes:
     return buffer.getvalue()
 
 
-# --- MODEL DEFINITION: SimpleFCN for WUSTL-IIoT-2021 (Matches Server's common_model.py) ---
+# --- MODEL DEFINITION: SimpleFCN (MATCHES DEEPER SERVER MODEL) ---
 class SimpleFCN(nn.Module):
-    """A simple Fully Connected Network (FCN) for WUSTL-IIoT-2021 tabular data."""
-    # NOTE: The server's common_model.py aliases SimpleFCN to SimpleCNN,
-    # but the client must use the explicit FCN structure with dimensions.
+    """
+    A Deeper Fully Connected Network (FCN) for WUSTL-IIoT-2021 tabular data.
+    Structure matches the server's updated common_model.py.
+    """
     def __init__(self, input_size: int = 41, num_classes: int = 2): 
         super(SimpleFCN, self).__init__()
+        
         # Define layers based on expected input/output dimensions from data_loader.py
-        self.fc1 = nn.Linear(input_size, 128)
-        self.fc2 = nn.Linear(128, 64)
-        self.fc3 = nn.Linear(64, num_classes) # Final layer size is num_classes
+        
+        # Layer 1: Increased size from 128 to 256
+        self.fc1 = nn.Linear(input_size, 256) 
+        
+        # Layer 2: Increased size from 64 to 128
+        self.fc2 = nn.Linear(256, 128)
+        
+        # --- NEW: Added third hidden layer for increased depth ---
+        self.fc3 = nn.Linear(128, 64)
+        
+        # Final output layer
+        self.fc4 = nn.Linear(64, num_classes) 
 
     def forward(self, x):
         # x is a 1D feature vector for each sample
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        
+        # --- NEW: Forward pass through the third hidden layer ---
+        x = F.relu(self.fc3(x))
+        
+        x = self.fc4(x)
         return x
     
 # --- Data Loading (Matches Server's data_loader.py logic) ---
@@ -139,7 +154,7 @@ class ClientModelManager:
         self.model = SimpleFCN(input_size=num_features, num_classes=num_classes).to(self.device)
         
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.info(f"ClientModelManager for {self.client_id} initialized with SimpleFCN.")
+        self.logger.info(f"ClientModelManager for {self.client_id} initialized with DEEPER SimpleFCN.")
 
     def deserialize_model_state(self, data: bytes) -> Dict[str, Any]:
         """
@@ -157,6 +172,7 @@ class ClientModelManager:
             
         self.logger.info("Starting local model training on WUSTL-IIoT data.")
         
+        # Load the server's state dict into the local model
         self.model.load_state_dict(global_model_state)
         
         # Setup for FCN/Tabular Data Training

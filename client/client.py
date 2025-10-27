@@ -337,7 +337,7 @@ class Client:
             while True:
                 heartbeat_request = client_service_pb2.HeartbeatRequest(client_id=self.client_id, timestamp=int(time.time()))
                 try:
-                    heartbeat_response = await self.client_service_stub.SendHeartbeat(heartbeat_request, timeout=10)
+                    heartbeat_response = await self.client_service_stub.SendHeartbeat(heartbeat_request, timeout=30)
                     if heartbeat_response.success:
                         logger.debug(f"Heartbeat success. Server time: {heartbeat_response.server_timestamp}")
                         if heartbeat_response.new_round_available:

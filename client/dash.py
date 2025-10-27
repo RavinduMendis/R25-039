@@ -21,7 +21,7 @@ app = typer.Typer(help="A TUI to launch and control the FL client's privacy pref
 def is_client_api_ready():
     """Checks if the client's local API server is running."""
     try:
-        response = requests.get(f"{BASE_URL}/get_privacy_preference", timeout=1)
+        response = requests.get(f"{BASE_URL}/get_privacy_preference", timeout=30)
         return response.status_code == 200
     except requests.exceptions.RequestException:
         return False
