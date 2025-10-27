@@ -1,3 +1,14 @@
+grpcio
+torch==2.3.1+cpu
+torchaudio==2.3.1+cpu
+torchvision==0.18.1+cpu
+python-json-logger
+google
+protobuf
 cryptography
 aiohttp
- grpcio_tools cryptography aiohttp aiohttp_cors python-json-logger
+aiohttp-cors
+joblib
+scikit-learn
+rich
+prompt-toolkit
